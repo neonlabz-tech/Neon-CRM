@@ -3,7 +3,7 @@ import { blankClient, clientCodeNumber, formatClientCode, loadClients, nextClien
 import { formatScopeHtml, sanitizeScopeHtml, scopeHasText } from "./richText.js";
 import { loadUsers } from "./crm.js";
 import { invoiceDocumentFromPayment, invoiceDocumentFromQuote } from "./brandDocument.js";
-import { approveProjectInvoice, loadFinance, notifyRole, notifyUser, projectInvoiceFor, queueProjectInvoice } from "./finance.js";
+import { approveProjectInvoice, loadFinance, notifyRole, notifyUser, projectInvoiceFor, queueProjectInvoice, rememberPayingClient } from "./finance.js";
 import { formatPhone } from "./hrms.js";
 import { dataOwner, readAccount, sessionAccount, writeScoped } from "./scope.js";
 import { crmStorage } from "./storage.js";
@@ -11,6 +11,7 @@ import { crmStorage } from "./storage.js";
 const STORAGE_KEY = "neon-crm-sales";
 const PACKAGES_KEY = "neon-crm-packages";
 const INCOMING_KEY = "neon-crm-incoming-projects";
+const PAYING_CLIENTS_KEY = "neon-crm-paying-clients";
 const LEAD_INDEX_KEY = "neon-crm-lead-index";
 export const LEAD_PHONE_EXISTS_MESSAGE = "This phone number already exists in the system.";
 
@@ -1137,10 +1138,45 @@ export function salesClientByName(name) {
   return salesClientDirectory().find((item) => item.name.toLowerCase() === key) || null;
 }
 
+function sharedPayingClients() {
+  try {
+    const raw = JSON.parse(crmStorage.getItem(PAYING_CLIENTS_KEY) || "[]");
+    return Array.isArray(raw) ? raw : [];
+  } catch {
+    return [];
+  }
+}
+
+function addPayingClient(byName, next) {
+  const name = String(next?.name || "").trim();
+  if (!name) return;
+  const key = name.toLowerCase();
+  const current = byName.get(key);
+  if (!current) {
+    byName.set(key, {
+      name,
+      code: next.code || "",
+      email: next.email || "",
+      phone: next.phone || "",
+      address: next.address || "",
+    });
+    return;
+  }
+  byName.set(key, {
+    ...current,
+    code: current.code || next.code || "",
+    email: current.email || next.email || "",
+    phone: current.phone || next.phone || "",
+    address: current.address || next.address || "",
+  });
+}
+
 export function payingClientsForPm(username) {
   const user = loadUsers().find((item) => item.active && item.username === username);
   if (!user || user.role !== "pm") return [];
   const byName = new Map();
+  sharedPayingClients().forEach((item) => addPayingClient(byName, item));
+  let sawSalesPayment = false;
   loadUsers()
     .filter((item) => item.active && item.role === "sales")
     .forEach((salesUser) => {
@@ -1149,6 +1185,7 @@ export function payingClientsForPm(username) {
         if (!payment || payment.status === "cancelled") return;
         const approved = payment.approval === "approved" || (payment.status === "confirmed" && payment.approval !== "pending");
         if (!approved) return;
+        sawSalesPayment = true;
         const quote = (sales?.quotes || []).find((item) => item.id === payment.quoteId);
         const name = String(payment.clientName || quote?.client || "").trim();
         if (!name) return;
@@ -1156,27 +1193,18 @@ export function payingClientsForPm(username) {
         const lead = (sales?.leads || []).find((item) => item.id === payment.clientId || item.id === quote?.clientId)
           || (sales?.leads || []).find((item) => String(item.business || "").trim().toLowerCase() === key);
         const details = salesClientByName(name);
-        const next = {
+        addPayingClient(byName, {
           name,
           code: lead?.clientCode || quote?.clientCode || payment.clientCode || "",
           email: details?.email || lead?.email || quote?.email || "",
           phone: details?.phone || lead?.phone || quote?.phone || "",
           address: details?.address || lead?.address || "",
-        };
-        const current = byName.get(key);
-        if (!current) {
-          byName.set(key, next);
-          return;
-        }
-        byName.set(key, {
-          ...current,
-          code: current.code || next.code,
-          email: current.email || next.email,
-          phone: current.phone || next.phone,
-          address: current.address || next.address,
         });
       });
     });
+  if (sessionAccount()?.role === "ceo" && sawSalesPayment) {
+    crmStorage.setItem(PAYING_CLIENTS_KEY, JSON.stringify([...byName.values()]));
+  }
   return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -1665,6 +1693,130 @@ export function setPaymentStatus(data, paymentId, status, receipt) {
         return next;
       }),
     },
+  };
+}
+
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let cell = "";
+  let quoted = false;
+  const source = String(text || "").replace(/^\uFEFF/, "");
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (quoted) {
+      if (char === "\"" && source[index + 1] === "\"") {
+        cell += "\"";
+        index += 1;
+      } else if (char === "\"") {
+        quoted = false;
+      } else {
+        cell += char;
+      }
+    } else if (char === "\"") {
+      quoted = true;
+    } else if (char === ",") {
+      row.push(cell);
+      cell = "";
+    } else if (char === "\n") {
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = "";
+    } else if (char !== "\r") {
+      cell += char;
+    }
+  }
+  if (cell || row.length) {
+    row.push(cell);
+    rows.push(row);
+  }
+  return rows.filter((item) => item.some((value) => String(value).trim()));
+}
+
+function csvDate(value, fallback = todayISO()) {
+  const raw = String(value || "").trim();
+  if (!raw) return fallback;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  const parts = raw.match(/^(\d{1,2})[/. -](\d{1,2})[/. -](\d{4})$/);
+  if (!parts) return fallback;
+  return `${parts[3]}-${parts[2].padStart(2, "0")}-${parts[1].padStart(2, "0")}`;
+}
+
+const LEAD_CSV_FIELDS = {
+  business: ["business", "customer", "business / customer", "business/customer", "name", "customer name"],
+  phone: ["phone", "mobile", "contact number"],
+  date: ["date", "lead date"],
+  source: ["source"],
+  service: ["service", "interested service"],
+  status: ["status", "lead status"],
+  email: ["email", "email address"],
+  address: ["address"],
+  businessType: ["business type", "industry"],
+  next: ["next", "next follow-up", "next follow up"],
+  notes: ["notes", "note"],
+};
+
+function csvHeaderMap(headers) {
+  const map = {};
+  headers.forEach((header, index) => {
+    const key = String(header || "").trim().toLowerCase();
+    Object.entries(LEAD_CSV_FIELDS).forEach(([field, names]) => {
+      if (names.includes(key)) map[field] = index;
+    });
+  });
+  return map.business === undefined ? null : map;
+}
+
+function csvValue(row, map, field, fallback) {
+  if (!map) return row[fallback] || "";
+  const index = map[field];
+  return index === undefined ? "" : row[index] || "";
+}
+
+export function importLeadsFromCsv(data, text, options = {}) {
+  const rows = parseCsv(text);
+  if (!rows.length) return { ok: false, error: "The CSV file has no lead rows." };
+  const map = csvHeaderMap(rows[0]);
+  const body = map ? rows.slice(1) : rows;
+  if (!body.length) return { ok: false, error: "The CSV file has headings but no lead rows." };
+  let current = data;
+  let imported = 0;
+  const skipped = [];
+  body.forEach((row, index) => {
+    const line = (map ? index + 2 : index + 1);
+    const business = String(csvValue(row, map, "business", 0)).trim();
+    if (!business) {
+      skipped.push(`Row ${line} has no customer name.`);
+      return;
+    }
+    const result = saveLead(current, {
+      date: csvDate(csvValue(row, map, "date", 2)),
+      business,
+      phone: csvValue(row, map, "phone", 1),
+      source: csvValue(row, map, "source", 3),
+      service: csvValue(row, map, "service", 4),
+      status: csvValue(row, map, "status", 5) || "New",
+      email: csvValue(row, map, "email", 6),
+      address: csvValue(row, map, "address", 7),
+      next: csvDate(csvValue(row, map, "next", 8), ""),
+      notes: csvValue(row, map, "notes", 9),
+      businessType: csvValue(row, map, "businessType", 10),
+      executive: options.executive || "",
+    });
+    if (!result.ok) {
+      skipped.push(`Row ${line}: ${result.error}`);
+      return;
+    }
+    current = result.data;
+    imported += 1;
+  });
+  if (!imported) return { ok: false, error: skipped[0] || "No leads were imported." };
+  const skipNote = skipped.length ? ` Skipped ${skipped.length}: ${skipped.slice(0, 3).join(" ")}` : "";
+  return {
+    ok: true,
+    data: current,
+    message: `Imported ${imported} lead${imported === 1 ? "" : "s"}.${skipNote}`,
   };
 }
 
@@ -2199,7 +2351,17 @@ export function ceoSetSaleStatus(row, status, patch = {}) {
           : item
       )),
     });
-    notifyRole("pm", `The CEO confirmed ${payment.clientName || quote?.client || "a client"}. This client is now available under Clients.`);
+    const clientName = payment.clientName || quote?.client || "";
+    const lead = (data.leads || []).find((item) => item.id === payment.clientId || item.id === quote?.clientId)
+      || (data.leads || []).find((item) => String(item.business || "").trim().toLowerCase() === String(clientName).trim().toLowerCase());
+    rememberPayingClient({
+      name: clientName,
+      code: payment.clientCode || lead?.clientCode || quote?.clientCode || "",
+      email: lead?.email || quote?.email || "",
+      phone: lead?.phone || quote?.phone || "",
+      address: lead?.address || quote?.address || "",
+    });
+    notifyRole("pm", `The CEO confirmed ${clientName || "a client"}. This client is now available under Clients.`);
     return { ok: true };
   }
   persistSalesAccount(row.owner, {

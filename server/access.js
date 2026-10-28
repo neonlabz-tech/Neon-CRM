@@ -7,6 +7,7 @@ export const SHARED_KEYS = new Set([
   "neon-crm-notices",
   "neon-crm-lead-index",
   "neon-crm-incoming-projects",
+  "neon-crm-paying-clients",
   "neon-crm-ceo-sales",
 ]);
 

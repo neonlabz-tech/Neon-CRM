@@ -849,20 +849,20 @@ function ReportsPage(props) {
   return (
     <div className="stack">
       <ScopeBar {...props} />
-      <div className="chart-grid">
-        <article className="panel">
+      <div className="report-split">
+        <article className="panel report-card">
           <h2>Confirmed Collections by Service</h2>
           {rows.length === 0 ? <p className="empty-copy">No confirmed collections in selected period</p> : rows.map(([service, amount]) => (
             <div className="minirow" key={service}>
-              <div style={{ width: "38%" }}>{service}</div>
-              <div style={{ flex: 1 }}>
+              <span className="report-label">{service}</span>
+              <div className="report-bar">
                 <div className="ceo-inline-bar"><i style={{ width: `${collections ? Math.round((100 * amount) / collections) : 0}%` }} /></div>
               </div>
               <b>{formatMoney(amount)}</b>
             </div>
           ))}
         </article>
-        <article className="panel">
+        <article className="panel report-card report-pipeline">
           <h2>Lead Pipeline · {scopedLeads.length} leads</h2>
           {LEAD_STAGES.map((status) => (
             <div className="minirow" key={status}>

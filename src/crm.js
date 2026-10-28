@@ -515,6 +515,23 @@ export function changePassword(username, currentPassword, nextPassword) {
   return { ok: true, user: updated.find((user) => user.username === value) };
 }
 
+export async function viewStoredPassword(username, ceoPassword) {
+  try {
+    const data = await api("/api/users/password-view", {
+      method: "POST",
+      body: { username, password: ceoPassword },
+    });
+    return {
+      ok: true,
+      viewable: Boolean(data.viewable),
+      password: data.viewable ? String(data.password || "") : "",
+      message: data.message || "",
+    };
+  } catch (error) {
+    return { ok: false, error: error.message || "Password is incorrect." };
+  }
+}
+
 export async function verifyPassword(username, password) {
   try {
     await api("/api/auth/verify", { method: "POST", body: { username, password } });

@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { LetterheadDialog } from "./Letterhead.jsx";
 import { loadProjects } from "./projects.js";
 import {
@@ -19,12 +20,14 @@ const TABS = [
   ["video", "Demo video"],
 ];
 
-export function ReportsWorkspace({ canEdit = true } = {}) {
+export function ReportsWorkspace({ canEdit = true, projects: projectSource } = {}) {
   const [tab, setTab] = useState("srs");
   const [data, setData] = useState(loadReports);
   const projects = useMemo(
-    () => loadProjects().projects.filter((project) => String(project.name || "").trim()).sort((a, b) => a.name.localeCompare(b.name)),
-    []
+    () => (projectSource || loadProjects().projects)
+      .filter((project) => String(project.name || "").trim() && !project.archived)
+      .sort((a, b) => a.name.localeCompare(b.name)),
+    [projectSource]
   );
 
   function apply(result) {
@@ -251,6 +254,7 @@ function ProposalPanel({ data, projects, apply, canEdit = true }) {
 
 function VideoPanel({ data, projects, apply, canEdit = true }) {
   const [draft, setDraft] = useState(null);
+  const [viewing, setViewing] = useState(null);
   const [removing, setRemoving] = useState(null);
   const [error, setError] = useState("");
 
@@ -289,26 +293,70 @@ function VideoPanel({ data, projects, apply, canEdit = true }) {
       ) : null}
       <article className="panel">
         {data.videos.length === 0 ? <p className="empty-copy">No demo videos yet.</p> : (
-          <div className="stack">
-            {data.videos.map((video) => (
-              <article key={video.id} className="package-card">
-                <strong>{video.title}</strong>
-                <span>{projectName(projects, video.projectId)} · {formatQuoteDate(video.date)}</span>
-                {video.notes ? <p>{video.notes}</p> : null}
-                {video.url ? <a href={video.url} target="_blank" rel="noreferrer">{video.url}</a> : <p>No link yet.</p>}
-                {embedUrl(video.url) ? <iframe className="demo-frame" src={embedUrl(video.url)} title={video.title} allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowFullScreen /> : null}
-                {canEdit ? (
-                  <div className="package-actions">
-                    <button className="ghost" type="button" onClick={() => { setDraft(video); setError(""); }}>Edit</button>
-                    <button className="ghost" type="button" onClick={() => setRemoving(video)}>Delete</button>
-                  </div>
-                ) : null}
-              </article>
-            ))}
+          <div className="tablewrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Title</th>
+                  <th>Project</th>
+                  <th>Date</th>
+                  <th>Link</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.videos.map((video) => (
+                  <tr key={video.id}>
+                    <td><strong>{video.title}</strong></td>
+                    <td>{projectName(projects, video.projectId)}</td>
+                    <td>{formatQuoteDate(video.date)}</td>
+                    <td className="cell-wrap">
+                      {video.url ? <a href={video.url} target="_blank" rel="noreferrer">{video.url}</a> : "No link yet."}
+                    </td>
+                    <td>
+                      <div className="icon-actions">
+                        <button
+                          className="icon-button"
+                          type="button"
+                          aria-label={`View ${video.title}`}
+                          title="View"
+                          onClick={() => setViewing(video)}
+                        >
+                          <EyeIcon />
+                        </button>
+                        {canEdit ? (
+                          <button
+                            className="icon-button"
+                            type="button"
+                            aria-label={`Edit ${video.title}`}
+                            title="Edit"
+                            onClick={() => { setDraft(video); setError(""); }}
+                          >
+                            <EditIcon />
+                          </button>
+                        ) : null}
+                        {canEdit ? (
+                          <button
+                            className="icon-button danger"
+                            type="button"
+                            aria-label={`Delete ${video.title}`}
+                            title="Delete"
+                            onClick={() => setRemoving(video)}
+                          >
+                            <DeleteIcon />
+                          </button>
+                        ) : null}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </article>
-      {removing ? <Confirm title={`Delete ${removing.title}?`} onCancel={() => setRemoving(null)} onConfirm={() => { apply(deleteReport(data, "videos", removing.id)); setRemoving(null); }} /> : null}
+      {viewing ? <VideoSummary video={viewing} projects={projects} onClose={() => setViewing(null)} /> : null}
+      {removing ? <Confirm title={`Delete ${removing.title}?`} onCancel={() => setRemoving(null)} onConfirm={() => { apply(deleteReport(data, "videos", removing.id)); setRemoving(null); if (viewing?.id === removing.id) setViewing(null); }} /> : null}
     </div>
   );
 }
@@ -354,6 +402,39 @@ function ProjectField({ projects, value, onChange }) {
         ))}
       </select>
     </label>
+  );
+}
+
+function VideoSummary({ video, projects, onClose }) {
+  const link = String(video.url || "").trim();
+  return createPortal(
+    <div className="modal-backdrop" onClick={onClose} role="presentation">
+      <section className="modal" role="dialog" aria-labelledby="video-summary-title" onClick={(event) => event.stopPropagation()}>
+        <h2 id="video-summary-title" className="summary-title">{video.title || "Demo video"}</h2>
+        <dl className="summary-list">
+          <div>
+            <dt className="tone-project">Project</dt>
+            <dd>{projectName(projects, video.projectId)}</dd>
+          </div>
+          <div>
+            <dt className="tone-date">Date</dt>
+            <dd>{formatQuoteDate(video.date)}</dd>
+          </div>
+          <div>
+            <dt className="tone-link">Link</dt>
+            <dd>{link ? <a href={link} target="_blank" rel="noreferrer">{link}</a> : "No link yet."}</dd>
+          </div>
+          <div>
+            <dt className="tone-notes">Notes</dt>
+            <dd>{video.notes || "No notes."}</dd>
+          </div>
+        </dl>
+        <div className="modal-actions">
+          <button className="ghost" type="button" onClick={onClose}>Close</button>
+        </div>
+      </section>
+    </div>,
+    document.body,
   );
 }
 
@@ -445,12 +526,28 @@ function projectName(projects, id) {
   return projects.find((project) => project.id === id)?.name || "Project removed";
 }
 
-function embedUrl(url) {
-  const value = String(url || "");
-  const watch = value.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([\w-]{6,})/);
-  if (watch) return `https://www.youtube.com/embed/${watch[1]}`;
-  const vimeo = value.match(/vimeo\.com\/(\d+)/);
-  if (vimeo) return `https://player.vimeo.com/video/${vimeo[1]}`;
-  return "";
+function EyeIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z" fill="none" stroke="currentColor" strokeWidth="1.8" />
+      <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" strokeWidth="1.8" />
+    </svg>
+  );
+}
+
+function EditIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 16.5V20h3.5L19 8.5 15.5 5 4 16.5Z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function DeleteIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M5 7h14M9 7V5h6v2M8 7l1 12h6l1-12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+    </svg>
+  );
 }
 

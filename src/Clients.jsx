@@ -5,13 +5,21 @@ import { publishClients, pushPmToMarketing } from "./clientSync.js";
 import { clientsWithPaying, salesClientByName, salesClientDirectory } from "./sales.js";
 import { dataOwner } from "./scope.js";
 
-function readClientPage() {
-  const published = publishClients();
-  return { ...published, clients: clientsWithPaying(published.clients, dataOwner()) };
+function companyClient(client) {
+  if (client?.source === "own") return false;
+  const name = String(client?.name || "").trim().toLowerCase();
+  if (!name) return false;
+  return salesClientDirectory().some((item) => item.name.trim().toLowerCase() === name);
 }
 
-export function ClientsWorkspace() {
-  const [page, setPage] = useState(readClientPage);
+function readClientPage(personal) {
+  const published = publishClients();
+  const listed = personal ? published.clients.filter((client) => !companyClient(client)) : clientsWithPaying(published.clients, dataOwner());
+  return { ...published, clients: listed };
+}
+
+export function ClientsWorkspace({ personal = false } = {}) {
+  const [page, setPage] = useState(() => readClientPage(personal));
   const [editing, setEditing] = useState(null);
   const [viewing, setViewing] = useState(null);
   const clients = page.clients;
@@ -19,7 +27,8 @@ export function ClientsWorkspace() {
   function commit(nextClients) {
     saveClients(nextClients);
     const published = publishClients();
-    setPage({ ...published, clients: clientsWithPaying(published.clients, dataOwner()) });
+    const listed = personal ? published.clients.filter((client) => !companyClient(client)) : clientsWithPaying(published.clients, dataOwner());
+    setPage({ ...published, clients: listed });
   }
 
   function save(client) {
@@ -52,6 +61,7 @@ export function ClientsWorkspace() {
       notes: client.notes.trim(),
       subContacts,
       code: client.code || nextClientCode(clients),
+      source: personal ? "own" : (client.source === "own" ? "own" : ""),
     };
     delete saved.projectIds;
     const exists = clients.some((item) => item.id === saved.id);
@@ -65,11 +75,13 @@ export function ClientsWorkspace() {
   return (
     <div className="stack">
       <div className="toolbar">
-        <p>Clients with a CEO-approved payment are listed here. Add the main person, assigned person, and contact details.</p>
+        <p>{personal
+          ? "Clients for your own projects. Add the company, the main person, and contact details."
+          : "Clients with a CEO-approved payment are listed here. Add the main person, assigned person, and contact details."}</p>
         <button className="primary" type="button" onClick={() => setEditing(blankClient())}>Add client</button>
       </div>
       <article className="panel">
-        {clients.length === 0 ? <p className="empty-copy">No approved clients yet. When the CEO approves a payment, that client is listed here.</p> : (
+        {clients.length === 0 ? <p className="empty-copy">{personal ? "No clients yet. Add a client for your own projects." : "No approved clients yet. When the CEO approves a payment, that client is listed here."}</p> : (
           <table>
             <thead>
               <tr>
@@ -103,7 +115,7 @@ export function ClientsWorkspace() {
           </table>
         )}
       </article>
-      {editing ? <ClientDialog client={editing} onClose={() => setEditing(null)} onSave={save} /> : null}
+      {editing ? <ClientDialog client={editing} salesPick={!personal} onClose={() => setEditing(null)} onSave={save} /> : null}
       {viewing ? (
         <ClientProfile
           client={viewing}
@@ -118,7 +130,7 @@ export function ClientsWorkspace() {
   );
 }
 
-function ClientDialog({ client, onClose, onSave }) {
+function ClientDialog({ client, onClose, onSave, salesPick = true }) {
   const [draft, setDraft] = useState(client);
   const [error, setError] = useState("");
   const editing = Boolean(client.name);
@@ -165,26 +177,28 @@ function ClientDialog({ client, onClose, onSave }) {
       <form className="modal sheet" onSubmit={submit}>
         <h2>{editing ? "Edit client" : "Add new client"}</h2>
         <p className="lede">Keep the client’s basic information here. Email is optional.</p>
-        <label>
-          Client from sales
-          <select
-            value={salesClientDirectory().some((item) => item.name === draft.name) ? draft.name : ""}
-            onChange={(event) => {
-              const details = salesClientByName(event.target.value);
-              if (!details) return;
-              setDraft((current) => ({
-                ...current,
-                name: details.name,
-                contactEmail: details.email,
-                contactPhone: details.phone,
-                address: details.address,
-              }));
-            }}
-          >
-            <option value="">Select a follow-up client</option>
-            {salesClientDirectory().map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}
-          </select>
-        </label>
+        {salesPick ? (
+          <label>
+            Client from sales
+            <select
+              value={salesClientDirectory().some((item) => item.name === draft.name) ? draft.name : ""}
+              onChange={(event) => {
+                const details = salesClientByName(event.target.value);
+                if (!details) return;
+                setDraft((current) => ({
+                  ...current,
+                  name: details.name,
+                  contactEmail: details.email,
+                  contactPhone: details.phone,
+                  address: details.address,
+                }));
+              }}
+            >
+              <option value="">Select a follow-up client</option>
+              {salesClientDirectory().map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}
+            </select>
+          </label>
+        ) : null}
         <div className="field-grid">
           <label>
             Company name

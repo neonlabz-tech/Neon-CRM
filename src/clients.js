@@ -114,6 +114,7 @@ export function blankClient() {
     subContacts: [],
     marketingId: "",
     origin: "pm",
+    source: "",
   };
 }
 
@@ -140,6 +141,7 @@ function normalizeClient(item) {
     subContacts: Array.isArray(item?.subContacts) ? item.subContacts.map(normalizeSubContact) : [],
     marketingId: item?.marketingId || "",
     origin: item?.origin === "marketing" ? "marketing" : item?.origin === "sales" ? "sales" : "pm",
+    source: item?.source === "own" ? "own" : "",
   };
 }
 

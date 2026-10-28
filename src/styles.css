@@ -1007,6 +1007,8 @@ tbody tr:hover td {
 
 .modal {
   width: min(440px, 100%);
+  max-height: calc(100vh - 40px);
+  overflow: auto;
   background: white;
   color: var(--text);
   border-radius: 8px;
@@ -1019,6 +1021,49 @@ tbody tr:hover td {
 .modal h2 {
   font-size: 18px;
   font-weight: 650;
+}
+
+.profile-form {
+  display: grid;
+  gap: 12px;
+}
+
+.summary-list {
+  display: grid;
+  gap: 14px;
+  margin: 0;
+}
+
+.summary-list div {
+  display: grid;
+  gap: 4px;
+}
+
+.summary-title {
+  color: #873CFF;
+}
+
+.summary-list dt {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.summary-list dt.tone-project { color: #2563EB; }
+.summary-list dt.tone-date { color: #0F766E; }
+.summary-list dt.tone-link { color: #C412FC; }
+.summary-list dt.tone-notes { color: #B45309; }
+
+.summary-list dd {
+  margin: 0;
+  color: #1A2042;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.summary-list dd a {
+  color: #873CFF;
 }
 
 .modal-actions {
@@ -1141,6 +1186,12 @@ tbody tr:hover td {
 
 td a {
   color: #873CFF;
+}
+
+.cell-wrap {
+  max-width: 280px;
+  vertical-align: top;
+  word-break: break-word;
 }
 
 .icon-actions {
@@ -3268,14 +3319,6 @@ input.file-input {
   font-size: 12px;
 }
 
-.demo-frame {
-  width: 100%;
-  aspect-ratio: 16 / 9;
-  border: 0;
-  border-radius: 12px;
-  background: #0c1426;
-}
-
 .dash-hero {
   display: flex;
   justify-content: space-between;
@@ -3720,6 +3763,7 @@ input.file-input {
   .md-dash-metrics,
   .brand-grid,
   .chart-grid,
+  .report-split,
   .md-dash-charts,
   .approval-card {
     grid-template-columns: 1fr;
@@ -4638,6 +4682,32 @@ button.kpi-btn {
   border-bottom: 1px solid var(--line);
 }
 
+.report-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 340px);
+  gap: 12px;
+  align-items: start;
+}
+
+.report-card .minirow {
+  margin: 0 16px;
+}
+
+.report-card .report-label {
+  width: 38%;
+  min-width: 0;
+}
+
+.report-card .report-bar {
+  flex: 1;
+  min-width: 0;
+}
+
+.report-pipeline .minirow b {
+  min-width: 2rem;
+  text-align: right;
+}
+
 .minirow > div {
   min-width: 0;
 }
@@ -4800,7 +4870,7 @@ button.kpi-btn {
 .kb-stage .col {
   display: flex;
   flex-direction: column;
-  background: #fff;
+  background: #f3f5fb;
   border: 0;
   border-radius: 22px;
   padding: 14px 12px 12px;
@@ -4813,21 +4883,21 @@ button.kpi-btn {
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 14px;
   min-height: 48px;
 }
 
 .kc {
   position: relative;
   background: #fff;
-  border: 1px solid #eef1f8;
+  border: 1px solid #d9dfec;
   border-radius: 16px;
   padding: 12px 12px 12px;
   display: grid;
   gap: 10px;
   color: var(--navy);
   cursor: grab;
-  box-shadow: 0 8px 18px rgba(26, 32, 66, 0.06);
+  box-shadow: 0 6px 16px rgba(26, 32, 66, 0.1);
 }
 
 .kc-label {

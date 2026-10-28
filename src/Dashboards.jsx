@@ -324,11 +324,11 @@ function RingChart({ slices, active, onPick }) {
   const cy = 80;
   const radius = 52;
   let cursor = -Math.PI / 2;
-  const gap = drawn.length > 1 ? 0.045 : 0;
+  const overlap = drawn.length > 1 ? 0.08 : 0;
   const arcs = drawn.map((slice) => {
     const sweep = (slice.value / total) * Math.PI * 2;
-    const start = cursor + gap / 2;
-    const end = cursor + Math.max(sweep - gap / 2, gap);
+    const start = cursor - overlap / 2;
+    const end = cursor + sweep + overlap / 2;
     cursor += sweep;
     return { ...slice, start, end, pct: Math.round((slice.value / total) * 100) };
   });
@@ -356,9 +356,9 @@ function RingChart({ slices, active, onPick }) {
           return (
             <g key={slice.id} className={selected ? "is-active" : ""} onClick={() => onPick(slice.id)}>
               {full ? (
-                <circle cx={cx} cy={cy} r={radius} fill="none" stroke={slice.color} strokeWidth={selected ? 22 : 18} />
+                <circle cx={cx} cy={cy} r={radius} fill="none" stroke={slice.color} strokeWidth="18" />
               ) : (
-                <path d={arc(slice.start, slice.end)} fill="none" stroke={slice.color} strokeWidth={selected ? 22 : 18} strokeLinecap="butt" />
+                <path d={arc(slice.start, slice.end)} fill="none" stroke={slice.color} strokeWidth="18" strokeLinecap="butt" />
               )}
             </g>
           );

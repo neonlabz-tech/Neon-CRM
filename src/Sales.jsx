@@ -52,6 +52,7 @@ import {
   loadSales,
   releaseSalesPaymentsForApproval,
   monthKey,
+  importLeadsFromCsv,
   nextLeadId,
   nextQuoteNumber,
   outstandingBalance,
@@ -1753,7 +1754,9 @@ function ConfirmedCeoQuotes({ username }) {
 
 function FollowUpPanel({ data, commit, canEdit, executives, username, month, allowDelete = false }) {
   const today = todayISO();
+  const csvInput = useRef(null);
   const [query, setQuery] = useState("");
+  const [notice, setNotice] = useState("");
   const [status, setStatus] = useState("");
   const [source, setSource] = useState("");
   const [open, setOpen] = useState(null);
@@ -1815,9 +1818,43 @@ function FollowUpPanel({ data, commit, canEdit, executives, username, month, all
         </div>
         <div className="lead-header-actions">
           {canEdit ? (
-            <button className="primary" type="button" onClick={() => { setOpen(blankLead(defaultExecutive(executives, username), month, nextLeadId())); setError(""); }}>
-              + Add lead
-            </button>
+            <>
+              <input
+                ref={csvInput}
+                type="file"
+                accept=".csv,text/csv"
+                hidden
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  event.target.value = "";
+                  if (!file) return;
+                  const reader = new FileReader();
+                  reader.onload = () => {
+                    const result = importLeadsFromCsv(data, String(reader.result || ""), {
+                      executive: defaultExecutive(executives, username),
+                    });
+                    if (!result.ok) {
+                      setNotice("");
+                      setError(result.error);
+                      return;
+                    }
+                    const stored = commit(result.data);
+                    if (stored) {
+                      setNotice("");
+                      setError(stored);
+                      return;
+                    }
+                    setError("");
+                    setNotice(result.message);
+                  };
+                  reader.readAsText(file);
+                }}
+              />
+              <button className="ghost" type="button" onClick={() => csvInput.current?.click()}>Import CSV</button>
+              <button className="primary" type="button" onClick={() => { setOpen(blankLead(defaultExecutive(executives, username), month, nextLeadId())); setError(""); setNotice(""); }}>
+                + Add lead
+              </button>
+            </>
           ) : null}
         </div>
       </div>
@@ -1834,6 +1871,7 @@ function FollowUpPanel({ data, commit, canEdit, executives, username, month, all
           </select>
         </div>
         {error ? <p className="form-error">{error}</p> : null}
+        {notice ? <p className="form-note">{notice}</p> : null}
         {rows.length === 0 ? (
           <p className="empty-copy">No matching leads.</p>
         ) : (

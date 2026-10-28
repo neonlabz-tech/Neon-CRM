@@ -11,6 +11,15 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { Audit, Store, User } from "./models.js";
 import { COMPANY, canReadStore, canWriteStore, isCeo, roleFromUsername } from "./access.js";
+import {
+  RESET_MESSAGE,
+  ceoRecoveryEmail,
+  completeStaffRequests,
+  consumeResetToken,
+  openResetRequests,
+  requestPasswordReset,
+} from "./passwordReset.js";
+import { openPassword, sealPassword } from "./passwordVault.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 4000;
@@ -123,12 +132,28 @@ async function seedCeo() {
   console.log("Seeded CEO001. Sign in and set a new password of at least 8 characters.");
 }
 
+async function ensureCeoRecoveryEmail() {
+  const email = ceoRecoveryEmail();
+  await User.updateOne(
+    { username: "CEO001", $or: [{ email: { $exists: false } }, { email: null }, { email: "" }] },
+    { $set: { email } }
+  );
+}
+
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 20,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Too many sign-in attempts. Try again in a few minutes." },
+});
+
+const resetLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many reset attempts. Try again in a few minutes." },
 });
 
 export function createApp() {
@@ -218,6 +243,7 @@ export function createApp() {
       if (password) {
         existing.passwordSource = "issued";
         existing.passwordUpdatedAt = new Date();
+        existing.passwordVault = sealPassword(password);
       }
       existing.active = req.body.active === false ? false : true;
       existing.password = undefined;
@@ -228,9 +254,14 @@ export function createApp() {
         username,
         role,
         passwordHash,
+        passwordVault: sealPassword(password),
         passwordSource: "issued",
         active: req.body.active === false ? false : true,
       });
+    }
+    if (password) {
+      await completeStaffRequests(username);
+      await writeAudit(req.user.username, "password.reset.issued", { username });
     }
     await writeAudit(req.user.username, existing ? "user.updated" : "user.created", { username });
     const users = await User.find().sort({ username: 1 });
@@ -264,6 +295,7 @@ export function createApp() {
             username,
             role,
             passwordHash,
+            ...(nextPassword ? { passwordVault: sealPassword(nextPassword) } : {}),
             passwordSource: nextPassword ? "issued" : (existing?.passwordSource || "issued"),
             passwordUpdatedAt: nextPassword ? new Date() : existing?.passwordUpdatedAt || null,
             active: isCeo(username, role) ? true : item.active !== false,
@@ -303,6 +335,7 @@ export function createApp() {
       return res.status(400).json({ error: "Choose a password that is different from the current one." });
     }
     user.passwordHash = await bcrypt.hash(nextPassword, 10);
+    user.passwordVault = sealPassword(nextPassword);
     user.password = undefined;
     user.passwordSource = "updated";
     user.passwordUpdatedAt = new Date();
@@ -310,6 +343,121 @@ export function createApp() {
     await User.updateOne({ _id: user._id }, { $unset: { password: 1 } });
     await writeAudit(user.username, "password.changed");
     res.json({ user: publicUser(user) });
+  });
+
+  app.post("/api/auth/forgot", resetLimiter, async (req, res) => {
+    const identifier = String(req.body?.username || "").trim();
+    let result = null;
+    try {
+      result = await requestPasswordReset(identifier);
+      if (result?.kind === "staff") {
+        await writeAudit(result.username, "password.reset.requested", { role: result.detail?.role || "" });
+      } else if (result?.kind === "sent") {
+        await writeAudit(result.username, "password.reset.email_sent", {});
+      }
+    } catch (error) {
+      await writeAudit("system", "password.reset.email_failed", { code: error.code || "MAIL_FAILED" });
+      const rejected = error.code === "EAUTH";
+      return res.status(503).json({
+        error: rejected
+          ? "Gmail rejected the sending mailbox login, so the reset email was not sent. Check SMTP_USER and SMTP_PASS, then try again."
+          : "The reset email could not be sent. Check the mail settings and try again.",
+      });
+    }
+    res.json({ ok: true, message: RESET_MESSAGE });
+  });
+
+  function profileView(user) {
+    return {
+      username: user.username,
+      fullName: user.fullName || "",
+      email: user.email || "",
+      phone: user.phone || "",
+      address: user.address || "",
+    };
+  }
+
+  app.get("/api/profile", requireAuth, requireCeo, async (req, res) => {
+    const user = await User.findOne({ username: req.user.username });
+    if (!user) return res.status(401).json({ error: "Sign in again." });
+    res.json({ profile: profileView(user) });
+  });
+
+  app.put("/api/profile", requireAuth, requireCeo, async (req, res) => {
+    const user = await User.findOne({ username: req.user.username }).select("+passwordHash +password");
+    if (!user) return res.status(401).json({ error: "Sign in again." });
+    const fullName = String(req.body?.fullName || "").trim();
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const phoneDigits = String(req.body?.phone || "").replace(/\D/g, "");
+    const address = String(req.body?.address || "").trim();
+    if (!fullName) return res.status(400).json({ error: "Enter your full name." });
+    if (fullName.length > 120) return res.status(400).json({ error: "Full name must be 120 characters or fewer." });
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: "Enter a valid email address." });
+    if (phoneDigits && phoneDigits.length !== 10) return res.status(400).json({ error: "Enter a 10-digit phone number, or leave the phone blank." });
+    if (address.length > 300) return res.status(400).json({ error: "Address must be 300 characters or fewer." });
+    const taken = await User.findOne({ email, username: { $ne: user.username } });
+    if (taken) return res.status(400).json({ error: "That email is already used by another account." });
+    const emailChanged = email !== user.email;
+    user.fullName = fullName;
+    user.email = email;
+    user.phone = phoneDigits;
+    user.address = address;
+    await user.save();
+    await writeAudit(user.username, "profile.updated", { emailChanged });
+    res.json({
+      ok: true,
+      message: emailChanged
+        ? "Profile saved. Password reset emails will now go to this address."
+        : "Profile saved.",
+      profile: profileView(user),
+    });
+  });
+
+  app.post("/api/auth/reset", resetLimiter, async (req, res) => {
+    const token = String(req.body?.token || "").trim();
+    const nextPassword = String(req.body?.password || "").trim();
+    if (nextPassword.length < MIN_PASSWORD) {
+      return res.status(400).json({ error: `Use at least ${MIN_PASSWORD} characters for the new password.` });
+    }
+    const result = await consumeResetToken(token, nextPassword, (value) => bcrypt.hash(value, 10));
+    if (!result.ok) return res.status(400).json({ error: result.error });
+    await writeAudit(result.username, "password.reset.completed", {});
+    res.json({ ok: true });
+  });
+
+  app.get("/api/auth/reset-requests", requireAuth, requireCeo, async (_req, res) => {
+    const requests = await openResetRequests();
+    res.json({ requests });
+  });
+
+  app.post("/api/users/password-view", requireAuth, requireCeo, async (req, res) => {
+    const username = String(req.body?.username || "").trim().toUpperCase();
+    const password = String(req.body?.password || "").trim();
+    const ceo = await User.findOne({ username: req.user.username }).select("+passwordHash +password");
+    if (!ceo || !(await passwordMatches(ceo, password))) {
+      await writeAudit(req.user.username, "password.view.denied", { username });
+      return res.status(401).json({ error: "Password is incorrect." });
+    }
+    if (!username || username === req.user.username) {
+      await writeAudit(req.user.username, "password.view.checked", { username, result: "own-account" });
+      return res.json({
+        ok: true,
+        viewable: false,
+        message: "Your own password is not shown here. Use Change password to replace it.",
+      });
+    }
+    const user = await User.findOne({ username }).select("+passwordVault");
+    const revealed = openPassword(user?.passwordVault);
+    if (!revealed) {
+      await writeAudit(req.user.username, "password.view.checked", { username, result: "unavailable" });
+      return res.json({
+        ok: true,
+        viewable: false,
+        message: "This password was saved before viewing was enabled. Issue a new temporary password, then it can be viewed.",
+      });
+    }
+    await writeAudit(req.user.username, "password.view.revealed", { username });
+    res.json({ ok: true, viewable: true, password: revealed });
   });
 
   app.post("/api/auth/verify", requireAuth, loginLimiter, async (req, res) => {
@@ -401,6 +549,7 @@ export async function start() {
     secret();
     await mongoose.connect(MONGODB_URI);
     await seedCeo();
+    await ensureCeoRecoveryEmail();
     const app = createApp();
     app.listen(PORT, () => {
       console.log(`Neon CRM API on http://localhost:${PORT}`);
