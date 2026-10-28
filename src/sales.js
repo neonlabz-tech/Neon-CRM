@@ -1634,6 +1634,9 @@ function submitInvoice(payment, quote) {
 export function setPaymentStatus(data, paymentId, status, receipt) {
   const payment = data.payments.find((item) => item.id === paymentId);
   if (!payment) return { ok: false, error: "That payment was not found." };
+  if (status === "cancelled" && sessionAccount()?.role === "sales") {
+    return { ok: false, error: "Sales admin cannot cancel a payment." };
+  }
   if (status === "confirmed") {
     const quote = locateQuote(data, payment.quoteId);
     const others = reservedAmount(data, payment.quoteId, payment.id);

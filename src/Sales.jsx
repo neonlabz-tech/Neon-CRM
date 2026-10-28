@@ -4,7 +4,7 @@ import neonLogo from "./assets/neonlabz-logo.png";
 import { loadClients } from "./clients.js";
 import { dataOwner, sessionAccount } from "./scope.js";
 import { loadUsers } from "./crm.js";
-import { dismissNotice, loadNotices, projectInvoiceById, projectInvoiceFor } from "./finance.js";
+import { dismissNotice, loadFinance, loadNotices, projectInvoiceById, projectInvoiceFor } from "./finance.js";
 import { InvoiceDialog } from "./InvoiceView.jsx";
 import { LetterheadDialog } from "./Letterhead.jsx";
 import { ScopeEditor, ScopeHtml } from "./ScopeEditor.jsx";
@@ -57,6 +57,7 @@ import {
   outstandingBalance,
   previewQuote,
   confirmedCeoQuotes,
+  paymentReceiptDocument,
   quotationDocument,
   quotationFigures,
   quoteCollection,
@@ -1565,6 +1566,7 @@ function PaymentsPanel({ data, commit, canEdit, month, source }) {
             <tbody>
               {[...listed].reverse().map((payment) => {
                 const quote = quotes.find((item) => item.id === payment.quoteId);
+                const invoice = approvedInvoiceForPayment(payment, quote, owner);
                 return (
                   <tr key={payment.id}>
                     <td>{payment.date}</td>
@@ -1583,11 +1585,14 @@ function PaymentsPanel({ data, commit, canEdit, month, source }) {
                     <td>{payment.approval === "pending" ? <span className="project-status scheduled">Awaiting CEO approval</span> : <PaymentBadge status={payment.status} />}</td>
                     <td>
                       <div className="icon-actions">
-                        {canEdit && payment.status !== "cancelled" && payment.approval !== "pending" ? (
+                        {ownPayments && canEdit && payment.status !== "cancelled" && payment.approval !== "pending" ? (
                           <button className="ghost" type="button" onClick={() => updateStatus(payment.id, "cancelled")}>Cancel</button>
                         ) : null}
-                        {projectInvoiceFor(owner, payment.id)?.approval === "approved" ? (
-                          <button className="primary" type="button" onClick={() => setInvoiceView(projectInvoiceFor(owner, payment.id))}>View invoice</button>
+                        {invoice ? (
+                          <>
+                            <button className="primary" type="button" onClick={() => setInvoiceView(invoice)}>View invoice</button>
+                            <button className="ghost" type="button" onClick={() => downloadDocumentPdf(invoice.receiptNo || "invoice", paymentReceiptDocument(invoice))}>Download</button>
+                          </>
                         ) : null}
                       </div>
                     </td>
@@ -2722,6 +2727,36 @@ function paymentClientLabel(payment, quote) {
   const name = payment.clientName || quote?.client || "—";
   const code = payment.clientCode || quote?.clientCode || "";
   return code ? `${code} · ${name}` : name;
+}
+
+function approvedInvoiceForPayment(payment, quote, owner) {
+  const approvedPayment = payment.status === "confirmed" && payment.approval !== "pending";
+  const stored = projectInvoiceFor(owner, payment.id)
+    || loadFinance().projectInvoices.find((item) => item.paymentId === payment.id)
+    || null;
+  if (stored?.approval === "approved") return stored;
+  if (!approvedPayment) return null;
+  if (stored) return { ...stored, approval: "approved" };
+  return {
+    id: payment.id,
+    receiptNo: quote?.number || payment.saleCode || "invoice",
+    paymentId: payment.id,
+    salesOwner: owner,
+    quoteId: payment.quoteId || "",
+    quoteNumber: quote?.number || "",
+    quoteTotal: quote?.total || payment.amount,
+    projectName: quote?.projectName || quote?.address || quote?.client || payment.clientName || "",
+    projectDetail: quote?.service || quote?.packageName || payment.type || "",
+    clientName: payment.clientName || quote?.client || "",
+    company: quote?.client || payment.clientName || "",
+    contact: [quote?.email, quote?.phone].filter(Boolean).join(" · ") || quote?.address || quote?.contact || "",
+    amount: payment.amount,
+    type: payment.type || "",
+    method: payment.method || "",
+    transactionId: payment.transactionId || "",
+    date: payment.date || "",
+    approval: "approved",
+  };
 }
 
 function readReceipt(file) {
