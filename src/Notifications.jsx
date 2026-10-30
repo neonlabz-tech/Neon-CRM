@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { api } from "./api.js";
 import { dismissNotice, loadNotices, NOTICES_CHANGED, projectInvoiceById } from "./finance.js";
 import { InvoiceDialog } from "./InvoiceView.jsx";
 import { openCeoSalesApprovals } from "./sales.js";
@@ -9,7 +10,9 @@ export function NotificationBell() {
   const wrap = useRef(null);
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState(() => loadNotices(username));
+  const [requests, setRequests] = useState([]);
   const [viewing, setViewing] = useState(null);
+  const ceo = sessionAccount()?.role === "ceo";
 
   function refresh() {
     setItems(loadNotices(username));
@@ -31,6 +34,28 @@ export function NotificationBell() {
   }, [username]);
 
   useEffect(() => {
+    if (!ceo) {
+      setRequests([]);
+      return undefined;
+    }
+    let stop = false;
+    async function load() {
+      try {
+        const data = await api("/api/auth/reset-requests");
+        if (!stop) setRequests(Array.isArray(data.requests) ? data.requests : []);
+      } catch {
+        if (!stop) setRequests([]);
+      }
+    }
+    load();
+    const timer = setInterval(load, 5000);
+    return () => {
+      stop = true;
+      clearInterval(timer);
+    };
+  }, [ceo]);
+
+  useEffect(() => {
     if (!open) return undefined;
     function onPointer(event) {
       if (!wrap.current?.contains(event.target)) setOpen(false);
@@ -46,7 +71,11 @@ export function NotificationBell() {
     };
   }, [open]);
 
-  const count = items.length;
+  const notices = [
+    ...requests.map((request) => ({ ...request, kind: "reset", created: request.createdAt })),
+    ...items,
+  ];
+  const count = notices.length;
 
   return (
     <div className="bell-wrap notice-bell" ref={wrap}>
@@ -69,25 +98,25 @@ export function NotificationBell() {
           <p className="bell-summary">{count ? `${count} waiting` : "Inbox is empty"}</p>
           {count === 0 ? (
             <p className="empty-copy">No notifications yet.</p>
-          ) : items.map((item) => {
+          ) : notices.map((item) => {
             const invoice = item.invoiceId ? projectInvoiceById(item.invoiceId) : null;
             return (
               <div className="bell-notice" key={item.id}>
                 <p>{item.text}</p>
                 <small>{formatNoticeTime(item.created)}</small>
                 <div className="icon-actions">
-                  {sessionAccount()?.role === "ceo" && invoice && invoice.approval !== "approved" ? (
-                    <button
-                      className="primary"
-                      type="button"
-                      onClick={() => {
-                        openCeoSalesApprovals({ paymentId: invoice.paymentId, owner: invoice.salesOwner });
-                        setOpen(false);
-                      }}
-                    >
-                      Review in Sales
-                    </button>
-                  ) : null}
+                {sessionAccount()?.role === "ceo" && ((invoice && invoice.approval !== "approved") || item.invoiceId) ? (
+                  <button
+                    className="primary"
+                    type="button"
+                    onClick={() => {
+                      openCeoSalesApprovals({ paymentId: invoice?.paymentId || "", owner: invoice?.salesOwner || "" });
+                      setOpen(false);
+                    }}
+                  >
+                    Review in Sales
+                  </button>
+                ) : null}
                   {invoice?.approval === "approved" ? (
                     <button
                       className="primary"
@@ -100,16 +129,18 @@ export function NotificationBell() {
                       View invoice
                     </button>
                   ) : null}
-                  <button
-                    className="ghost"
-                    type="button"
-                    onClick={() => {
-                      dismissNotice(item.id);
-                      refresh();
-                    }}
-                  >
-                    Dismiss
-                  </button>
+                  {item.kind === "reset" ? null : (
+                    <button
+                      className="ghost"
+                      type="button"
+                      onClick={() => {
+                        dismissNotice(item.id);
+                        refresh();
+                      }}
+                    >
+                      Dismiss
+                    </button>
+                  )}
                 </div>
               </div>
             );

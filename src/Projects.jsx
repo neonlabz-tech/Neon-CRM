@@ -6,7 +6,7 @@ import { loadClients } from "./clients.js";
 import { teamMembersFor } from "./hrms.js";
 import { sessionAccount } from "./scope.js";
 import { BackButton } from "./BackButton.jsx";
-import { applyClientQuote, loadIncomingProjects, quoteForClientRecord, salesClientByName } from "./sales.js";
+import { applyClientQuote, loadIncomingProjects, loadSales, projectTypeFromQuote, quoteForClientRecord, salesClientByName, salesClientDirectory } from "./sales.js";
 import { ReportsWorkspace } from "./Reports.jsx";
 import { ProjectPackagesBoard, PromisedPackagePanel } from "./Sales.jsx";
 import { publishClients } from "./clientSync.js";
@@ -64,9 +64,10 @@ const MILESTONE_STATUS = {
   done: "Done",
 };
 
-export function ProjectsWorkspace({ access, username, showListTab = true, showQuotations = true, showSalesFeed }) {
+export function ProjectsWorkspace({ access, username, showListTab = true, showQuotations = true, showSalesFeed, own = false }) {
   const canEdit = access === "full";
-  const salesFeed = showSalesFeed ?? showListTab;
+  const salesFeed = own ? false : (showSalesFeed ?? showListTab);
+  const showReports = own || !canEdit;
   const [tab, setTab] = useState("projects");
   const [data, setData] = useState(() => {
     publishClients();
@@ -86,11 +87,11 @@ export function ProjectsWorkspace({ access, username, showListTab = true, showQu
         {showQuotations ? <button type="button" className={tab === "quotations" ? "active" : ""} onClick={() => setTab("quotations")}>Quotations</button> : null}
         <button type="button" className={tab === "sprints" ? "active" : ""} onClick={() => setTab("sprints")}>Sprints</button>
         <button type="button" className={tab === "milestones" ? "active" : ""} onClick={() => setTab("milestones")}>Milestones</button>
-        {canEdit ? null : (
+        {showReports ? (
           <button type="button" className={tab === "reports" ? "active" : ""} onClick={() => setTab("reports")}>Reports</button>
-        )}
+        ) : null}
       </div>
-      {tab === "projects" ? <ProjectPage data={data} commit={commit} canEdit={canEdit} username={username} /> : null}
+      {tab === "projects" ? <ProjectPage data={data} commit={commit} canEdit={canEdit} username={username} own={own} /> : null}
       {salesFeed && tab === "projects" ? <SalesProjects /> : null}
       {showQuotations && tab === "quotations" ? (
         <ProjectPackagesBoard
@@ -101,7 +102,7 @@ export function ProjectsWorkspace({ access, username, showListTab = true, showQu
       ) : null}
       {tab === "sprints" ? <SprintPage data={data} commit={commit} canEdit={canEdit} /> : null}
       {tab === "milestones" ? <MilestonePage data={data} commit={commit} canEdit={canEdit} /> : null}
-      {tab === "reports" ? <ReportsWorkspace canEdit={false} /> : null}
+      {tab === "reports" ? <ReportsWorkspace canEdit={own && canEdit} projects={data.projects} /> : null}
     </div>
   );
 }
@@ -150,7 +151,7 @@ function SalesProjects() {
   );
 }
 
-function ProjectPage({ data, commit, canEdit, username }) {
+function ProjectPage({ data, commit, canEdit, username, own = false }) {
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [asking, setAsking] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -160,7 +161,13 @@ function ProjectPage({ data, commit, canEdit, username }) {
   const counts = projectCounts(data.projects);
   const rows = data.projects.filter((project) => project.archived === archiveOpen);
   const people = teamMembersFor("pm");
-  const clients = loadClients();
+  const salesNames = own
+    ? new Set(salesClientDirectory().map((item) => item.name.trim().toLowerCase()))
+    : null;
+  const clients = loadClients().filter((client) => {
+    if (!own || client.source === "own") return true;
+    return !salesNames.has(String(client.name || "").trim().toLowerCase());
+  });
   const role = sessionAccount()?.role;
   function employeeNames(codes) {
     const list = normalizeAssignees(codes);
@@ -176,7 +183,9 @@ function ProjectPage({ data, commit, canEdit, username }) {
       return "Marketing manages this project. You can monitor it without editing.";
     }
     const match = clients.find((item) => item.name.trim().toLowerCase() === (project.client || "").trim().toLowerCase());
-    const quoteFields = applyClientQuote(match || { name: project.client, code: project.clientCode });
+    const quoteFields = own
+      ? ownClientQuote(match || { name: project.client, code: project.clientCode })
+      : applyClientQuote(match || { name: project.client, code: project.clientCode });
     const assignees = project.type === "marketing" ? [] : normalizeAssignees(project.assignees);
     const saved = {
       ...project,
@@ -206,7 +215,7 @@ function ProjectPage({ data, commit, canEdit, username }) {
     });
     const becameMarketing = saved.type === "marketing" || saved.type === "both";
     const wasMarketing = previous?.type === "marketing" || previous?.type === "both";
-    if (becameMarketing && (!exists || !wasMarketing)) {
+    if (!own && becameMarketing && (!exists || !wasMarketing)) {
       notifyRole("marketing", `${manager} created ${TYPE_LABEL[saved.type] || "a project"} “${saved.name}” for ${saved.client || "a client"}. Open Project maintenance.`);
     }
     saveProjects({ ...data, projects });
@@ -297,7 +306,7 @@ function ProjectPage({ data, commit, canEdit, username }) {
           }}
         />
       ) : null}
-      {editing ? <ProjectDialog project={editing} clients={clients} onClose={() => setEditing(null)} onSave={save} /> : null}
+      {editing ? <ProjectDialog project={editing} clients={clients} own={own} onClose={() => setEditing(null)} onSave={save} /> : null}
       {viewing ? <ProjectRead project={viewing} onClose={() => setViewing(null)} /> : null}
       {milestones ? <MilestoneRead project={milestones} onClose={() => setMilestones(null)} /> : null}
       {archiving ? (
@@ -571,10 +580,30 @@ function Stat({ label, value, note }) {
   );
 }
 
-function ProjectDialog({ project, clients = [], onClose, onSave }) {
+function ownClientQuote(client) {
+  const name = String(client?.name || client?.client || "").trim().toLowerCase();
+  const code = String(client?.code || client?.clientCode || "").trim().toLowerCase();
+  const quote = (loadSales().quotes || []).find((item) => {
+    const quoteName = String(item.client || "").trim().toLowerCase();
+    const quoteCode = String(item.clientCode || "").trim().toLowerCase();
+    return (name && quoteName === name) || (code && quoteCode === code);
+  });
+  if (!quote) return { quote: null, type: "software", packageName: "", quoteNumber: "", quoteId: "", service: "" };
+  return {
+    quote,
+    type: projectTypeFromQuote(quote),
+    packageName: quote.packageName || "",
+    quoteNumber: quote.number || "",
+    quoteId: quote.id || "",
+    service: quote.service || "",
+  };
+}
+
+function ProjectDialog({ project, clients = [], own = false, onClose, onSave }) {
   const [draft, setDraft] = useState({ ...project, assignees: normalizeAssignees(project.assignees) });
   const [error, setError] = useState("");
-  const quote = quoteForClientRecord({ name: draft.client, code: draft.clientCode, client: draft.client, clientCode: draft.clientCode });
+  const quoteRecord = { name: draft.client, code: draft.clientCode, client: draft.client, clientCode: draft.clientCode };
+  const quote = own ? ownClientQuote(quoteRecord).quote : quoteForClientRecord(quoteRecord);
 
   function setField(key, value) {
     setDraft((current) => ({ ...current, [key]: value }));
@@ -595,8 +624,9 @@ function ProjectDialog({ project, clients = [], onClose, onSave }) {
       return;
     }
     const chosen = clients.find((item) => item.name === name);
-    const details = chosen || salesClientByName(name);
-    const quoteFields = applyClientQuote(chosen || { name, code: details?.code || "" });
+    const details = own ? chosen : (chosen || salesClientByName(name));
+    const subject = chosen || { name, code: details?.code || "" };
+    const quoteFields = own ? ownClientQuote(subject) : applyClientQuote(subject);
     setDraft((current) => ({
       ...current,
       client: name,
@@ -632,7 +662,7 @@ function ProjectDialog({ project, clients = [], onClose, onSave }) {
               value={draft.client || ""}
               onChange={(event) => chooseClient(event.target.value)}
             >
-              <option value="">{clients.length ? "Select a client" : "No approved clients yet"}</option>
+              <option value="">{clients.length ? "Select a client" : (own ? "Add a client under Clients first" : "No approved clients yet")}</option>
               {clients.map((item) => <option key={item.id} value={item.name}>{item.code ? `${item.code} · ` : ""}{item.name}</option>)}
               {draft.client && !clients.some((item) => item.name === draft.client) ? <option value={draft.client}>{draft.client}</option> : null}
             </select>
@@ -674,30 +704,38 @@ function ProjectDialog({ project, clients = [], onClose, onSave }) {
 }
 
 function ProjectRead({ project, onClose }) {
+  const technical = normalizeAssignees(project.assignees).join(", ") || "—";
+  const marketing = normalizeAssignees(project.marketingAssignees).join(", ") || "—";
   return (
     <Modal onClose={onClose}>
-      <div className="modal">
-        <p className="kicker">Project</p>
-        <h2>{project.name}</h2>
-        <ul>
-          <li>Type: {TYPE_LABEL[project.type] || "—"}</li>
-          <li>Client: {project.client || "—"}</li>
-          <li>Package: {project.packageName || "—"}</li>
-          <li>Quotation: {project.quoteNumber || "—"}</li>
-          <li>Email: {project.email || "—"}</li>
-          <li>Phone: {project.phone || "—"}</li>
-          <li>Address: {project.address || "—"}</li>
-          <li>Technical team: {normalizeAssignees(project.assignees).join(", ") || "—"}</li>
-          <li>Marketing team: {normalizeAssignees(project.marketingAssignees).join(", ") || "—"}</li>
-          <li>Status: {STATUS_LABEL[project.status]}</li>
-          <li>Start: {formatDate(project.startDate)}</li>
-          <li>Due: {formatDate(project.dueDate)}</li>
+      <section className="modal sheet project-read">
+        <header className="project-read-head">
+          <div>
+            <p className="kicker">{project.code || "Project"}</p>
+            <h2>{project.name}</h2>
+            <p className="project-read-type">{TYPE_LABEL[project.type] || "Project"}{project.client ? ` · ${project.client}` : ""}</p>
+          </div>
+          <span className={`project-status ${project.status || "in-progress"}`}>{STATUS_LABEL[project.status] || "In progress"}</span>
+        </header>
+        <ul className="client-facts">
+          <li><span>Package</span><strong>{project.packageName || "—"}</strong></li>
+          <li><span>Quotation</span><strong>{project.quoteNumber || "—"}</strong></li>
+          <li><span>Email</span><strong>{project.email || "—"}</strong></li>
+          <li><span>Phone</span><strong>{project.phone || "—"}</strong></li>
+          <li><span>Technical team</span><strong>{technical}</strong></li>
+          <li><span>Marketing team</span><strong>{marketing}</strong></li>
+          <li><span>Start</span><strong>{formatDate(project.startDate)}</strong></li>
+          <li><span>Due</span><strong>{formatDate(project.dueDate)}</strong></li>
+          <li className="span-row"><span>Address</span><strong>{project.address || "—"}</strong></li>
         </ul>
-        <p>{project.description || "No description."}</p>
+        <section className="project-read-note">
+          <span>Description</span>
+          <p>{project.description || "No description."}</p>
+        </section>
         <div className="modal-actions">
           <button className="ghost" type="button" onClick={onClose}>Close</button>
         </div>
-      </div>
+      </section>
     </Modal>
   );
 }

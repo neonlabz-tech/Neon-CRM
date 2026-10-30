@@ -11,6 +11,7 @@ import {
   roleFromUsername,
   updateUser,
   verifyPassword,
+  viewStoredPassword,
 } from "./crm.js";
 import { MarketingTasksWorkspace, MarketingWorkspace, ProjectMaintenance } from "./Marketing.jsx";
 import { ProjectsWorkspace } from "./Projects.jsx";
@@ -34,14 +35,25 @@ import { api, readSession, writeSession } from "./api.js";
 import { flushStores, getUsers, hydrateFromApi, setUsers } from "./storage.js";
 import { BackButton } from "./BackButton.jsx";
 import { NotificationBell } from "./Notifications.jsx";
+import { CeoProfile } from "./CeoProfile.jsx";
 import neonLogo from "./assets/neonlabz-logo.png";
-import neonMark from "./assets/neonlabz-mark.png";
+import sidebarLogo from "./assets/neonlabz-sidebar-logo.png";
+
+function resetTokenFromLocation() {
+  const href = window.location.href;
+  const query = new URL(href).searchParams.get("reset");
+  if (query) return query.trim();
+  const match = href.match(/\/reset\/([A-Za-z0-9]+)/i);
+  return match ? match[1] : "";
+}
 
 export default function App() {
   const [session, setSession] = useState(readSession);
   const [authView, setAuthView] = useState("login");
+  const [resetToken, setResetToken] = useState(resetTokenFromLocation);
   const [ready, setReady] = useState(!readSession());
   const [bootError, setBootError] = useState("");
+  const [resetNotice, setResetNotice] = useState("");
 
   useEffect(() => {
     const current = readSession();
@@ -124,6 +136,24 @@ export default function App() {
     setReady(true);
   }
 
+  const activeResetToken = resetToken || resetTokenFromLocation();
+  if (activeResetToken) {
+    return (
+      <ResetPassword
+        token={activeResetToken}
+        onDone={() => {
+          window.history.replaceState({}, "", "/");
+          writeSession(null);
+          setSession(null);
+          setResetToken("");
+          setResetNotice("Password updated. Sign in with your new password.");
+          setAuthView("login");
+          setReady(true);
+        }}
+      />
+    );
+  }
+
   if (!ready) {
     return (
       <AuthLayout title="Neon Labz CRM" lede="Loading your workspace.">
@@ -136,7 +166,7 @@ export default function App() {
     return authView === "forgot" ? (
       <ForgotPassword onBack={() => setAuthView("login")} />
     ) : (
-      <Login onSuccess={signIn} onForgot={() => setAuthView("forgot")} bootError={bootError} />
+      <Login onSuccess={signIn} onForgot={() => setAuthView("forgot")} bootError={bootError} notice={resetNotice} />
     );
   }
 
@@ -154,7 +184,7 @@ export default function App() {
   );
 }
 
-function Login({ onSuccess, onForgot, bootError = "" }) {
+function Login({ onSuccess, onForgot, bootError = "", notice = "" }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -240,6 +270,7 @@ function Login({ onSuccess, onForgot, bootError = "" }) {
             </button>
           </span>
         </label>
+        {notice ? <p className="form-note">{notice}</p> : null}
         {error ? <p className="form-error">{error}</p> : null}
         <button className="auth-submit" type="submit" disabled={busy}>
           {busy ? "Signing in…" : "Sign in"}
@@ -256,23 +287,33 @@ function Login({ onSuccess, onForgot, bootError = "" }) {
 function ForgotPassword({ onBack }) {
   const [username, setUsername] = useState("");
   const [sent, setSent] = useState(false);
+  const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
 
-  function submit(event) {
+  async function submit(event) {
     event.preventDefault();
-    if (!roleFromUsername(username)) {
-      setError("Enter a company username such as SD001.");
-      setSent(false);
-      return;
-    }
+    setBusy(true);
     setError("");
-    setSent(true);
+    setSent(false);
+    try {
+      const data = await api("/api/auth/forgot", {
+        method: "POST",
+        body: { username: username.trim() },
+      });
+      setMessage(data.message || "If this account can be reset, the request has been received.");
+      setSent(true);
+    } catch (err) {
+      setError(err.message || "Could not submit the request.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
     <AuthLayout
       title="Forgot password"
-      lede="Password resets stay with the CEO. Submit your username and she will issue a new password."
+      lede="The CEO enters the email saved in Profile. Everyone else enters their user ID, such as PM001 or MD001."
     >
       <form className="form auth-form" onSubmit={submit}>
         <label>
@@ -283,20 +324,91 @@ function ForgotPassword({ onBack }) {
               autoComplete="username"
               value={username}
               onChange={(event) => setUsername(event.target.value)}
+              placeholder="User ID or CEO email"
               required
             />
           </span>
         </label>
         {error ? <p className="form-error">{error}</p> : null}
-        {sent ? (
-          <p className="form-note">
-            Request received for {username.trim().toUpperCase()}. The CEO will share a new password with you.
-          </p>
-        ) : null}
-        <button className="auth-submit" type="submit">
-          Request reset
+        {sent ? <p className="form-note">{message}</p> : null}
+        <button className="auth-submit" type="submit" disabled={busy}>
+          {busy ? "Sending…" : "Request reset"}
         </button>
         <BackButton onClick={onBack} label="Back to sign in" />
+      </form>
+    </AuthLayout>
+  );
+}
+
+function ResetPassword({ token, onDone }) {
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event) {
+    event.preventDefault();
+    if (password.trim().length < 8) {
+      setError("Use at least 8 characters for the new password.");
+      return;
+    }
+    if (password !== confirm) {
+      setError("Passwords do not match.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      await api("/api/auth/reset", {
+        method: "POST",
+        body: { token, password: password.trim() },
+      });
+      onDone();
+    } catch (err) {
+      setError(err.message || "This reset link is invalid or has expired.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <AuthLayout
+      title="Set a new password"
+      lede="Enter the new CEO password and confirm it. Saving replaces the password in the CRM. This link works once and expires in 30 minutes."
+    >
+      <form className="form auth-form" onSubmit={submit}>
+        <label>
+          New password
+          <span className="auth-field">
+            <LockIcon />
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              minLength={8}
+              required
+            />
+          </span>
+        </label>
+        <label>
+          Confirm new password
+          <span className="auth-field">
+            <LockIcon />
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={confirm}
+              onChange={(event) => setConfirm(event.target.value)}
+              minLength={8}
+              required
+            />
+          </span>
+        </label>
+        {error ? <p className="form-error">{error}</p> : null}
+        <button className="auth-submit" type="submit" disabled={busy}>
+          {busy ? "Updating…" : "Update password"}
+        </button>
       </form>
     </AuthLayout>
   );
@@ -409,8 +521,7 @@ function Shell({ session, onSignOut }) {
       <aside className="sidebar" id="app-sidebar" aria-hidden={narrow && !menuOpen} inert={narrow && !menuOpen ? true : undefined}>
         <div className="sidebar-brand">
           <div className="sidebar-lockup">
-            <img className="sidebar-mark" src={neonMark} alt="" />
-            <span className="sidebar-wordmark">NeonLabz<i>.</i></span>
+            <img className="sidebar-logo" src={sidebarLogo} alt="NeonLabz" />
           </div>
           <button className="sidebar-close" type="button" aria-label="Close menu" onClick={() => setMenuOpen(false)}>
             <CloseMenuIcon />
@@ -649,7 +760,7 @@ function accessCopy(role, pageId, access) {
       : "View only. Open Projects to monitor marketing-admin projects, milestones, assigned employees, due dates, and task progress.";
   }
   if (pageId === "own-project-list") {
-    return "Your projects, sprints, and milestones. Only this account can view or edit them.";
+    return "Your projects, sprints, milestones, and reports. Company department records stay on their own pages.";
   }
   if (pageId === "own-leads") {
     return "Your leads, call outcomes, and follow-ups. They stay on this account, separate from the sales department.";
@@ -747,12 +858,12 @@ function PageView({ pageId, access, ceoUsername }) {
   if (pageId === "marketing-issues") return <MarketingIssuesWorkspace />;
   if (pageId === "marketing") return <MarketingWorkspace access={access} />;
   if (pageId === "own-project-list") {
-    return <ProjectsWorkspace access="full" username={ceoUsername} showListTab showQuotations={false} showSalesFeed={false} />;
+    return <ProjectsWorkspace access="full" username={ceoUsername} showListTab showQuotations={false} showSalesFeed={false} own />;
   }
   if (pageId === "own-leads") {
     return <SalesWorkspace access="full" username={ceoUsername} section="follow" personal />;
   }
-  if (pageId === "own-clients") return <ClientsWorkspace />;
+  if (pageId === "own-clients") return <ClientsWorkspace personal />;
   if (pageId === "own-marketing") return <MarketingWorkspace access="full" />;
   if (pageId === "own-payments") return <SalesWorkspace access="full" username={ceoUsername} section="payments" paymentsSource="own" />;
   if (pageId === "projects") return <ProjectsWorkspace access={access} username={ceoUsername} />;
@@ -794,6 +905,7 @@ function UserManagement({ ceoUsername }) {
 
   return (
     <div className="stack" key={revision}>
+      <ResetRequests users={users} ceoUsername={ceoUsername} onChanged={refresh} />
       <UserGroup
         title="Chief Executive Officer"
         rows={users.filter((user) => user.role === "ceo")}
@@ -823,6 +935,7 @@ function loginName(employee) {
 
 function AdminAccounts({ department, employees, users, ceoUsername, onChanged }) {
   const [editing, setEditing] = useState(null);
+  const [viewing, setViewing] = useState(null);
   const rows = [...employees].sort((a, b) => {
     if (a.memberType === b.memberType) return a.name.localeCompare(b.name);
     return a.memberType === "admin" ? -1 : 1;
@@ -865,6 +978,15 @@ function AdminAccounts({ department, employees, users, ceoUsername, onChanged })
                         <button
                           className="icon-button"
                           type="button"
+                          aria-label={`View password for ${username}`}
+                          title="View password"
+                          onClick={() => setViewing(account || { username })}
+                        >
+                          <EyeIcon />
+                        </button>
+                        <button
+                          className="icon-button"
+                          type="button"
                           aria-label={account ? `Edit ${username}` : `Set password for ${username}`}
                           title={account ? "Issue a new password" : "Set password so this person can sign in"}
                           onClick={() => setEditing(account || { username, role: roleFromUsername(username) || department.role, active: true, needsPassword: true })}
@@ -880,6 +1002,7 @@ function AdminAccounts({ department, employees, users, ceoUsername, onChanged })
           </tbody>
         </table>
       )}
+      {viewing ? <ViewPasswordDialog user={viewing} onClose={() => setViewing(null)} /> : null}
       {editing ? (
         <EditUserDialog
           user={editing}
@@ -940,9 +1063,18 @@ function UserRow({ user, ceoUsername, onChanged }) {
             <button
               className="icon-button"
               type="button"
-              aria-label={`Edit ${user.username}`}
-              title="Issue a new password"
-              onClick={() => setDialog("edit")}
+              aria-label={`View password for ${user.username}`}
+              title="View password"
+              onClick={() => setDialog("view")}
+            >
+              <EyeIcon />
+            </button>
+            <button
+              className="icon-button"
+              type="button"
+              aria-label={user.role === "ceo" ? `Edit profile for ${user.username}` : `Edit ${user.username}`}
+              title={user.role === "ceo" ? "Edit profile" : "Issue a new password"}
+              onClick={() => setDialog(user.role === "ceo" ? "profile" : "edit")}
             >
               <EditIcon />
             </button>
@@ -960,6 +1092,14 @@ function UserRow({ user, ceoUsername, onChanged }) {
           </div>
         </td>
       </tr>
+      {dialog === "view" ? (
+        <ViewPasswordDialog user={user} onClose={() => setDialog(null)} />
+      ) : null}
+      {dialog === "profile" ? (
+        <Modal>
+          <CeoProfile onClose={() => setDialog(null)} />
+        </Modal>
+      ) : null}
       {dialog === "edit" ? (
         <EditUserDialog
           user={user}
@@ -982,6 +1122,145 @@ function UserRow({ user, ceoUsername, onChanged }) {
         />
       ) : null}
     </>
+  );
+}
+
+function ResetRequests({ users, ceoUsername, onChanged }) {
+  const [requests, setRequests] = useState([]);
+  const [editing, setEditing] = useState(null);
+
+  useEffect(() => {
+    let stop = false;
+    async function load() {
+      try {
+        const data = await api("/api/auth/reset-requests");
+        if (!stop) setRequests(Array.isArray(data.requests) ? data.requests : []);
+      } catch {
+        if (!stop) setRequests([]);
+      }
+    }
+    load();
+    const timer = window.setInterval(load, 5000);
+    return () => {
+      stop = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  if (!requests.length) return null;
+  return (
+    <article className="panel">
+      <h2>Password reset requests</h2>
+      <p className="lede">Issue a temporary password and share it privately. The person must change it the next time they sign in.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>User</th>
+            <th>Requested</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {requests.map((request) => (
+            <tr key={request.id}>
+              <td>
+                <code>{request.username}</code>
+                {request.name ? ` · ${request.name}` : ""}
+              </td>
+              <td>{request.createdAt ? new Date(request.createdAt).toLocaleString("en-GB") : ""}</td>
+              <td>
+                <button
+                  className="primary"
+                  type="button"
+                  onClick={() => setEditing(users.find((user) => user.username === request.username) || { username: request.username, active: true, needsPassword: true })}
+                >
+                  Issue temporary password
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {editing ? (
+        <EditUserDialog
+          user={editing}
+          ceoUsername={ceoUsername}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            setEditing(null);
+            onChanged();
+          }}
+        />
+      ) : null}
+    </article>
+  );
+}
+
+function ViewPasswordDialog({ user, onClose }) {
+  const [ceoPassword, setCeoPassword] = useState("");
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [revealed, setRevealed] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    const result = await viewStoredPassword(user.username, ceoPassword);
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    setCeoPassword("");
+    if (result.viewable && result.password) {
+      setRevealed(result.password);
+      setMessage("");
+      return;
+    }
+    setMessage(result.message || "This password cannot be viewed yet.");
+  }
+
+  return (
+    <Modal>
+      <form className="modal" onSubmit={revealed || message ? (event) => event.preventDefault() : submit}>
+        <h2>View password</h2>
+        <p className="lede">
+          {revealed
+            ? `Password for ${user.username}. This does not change it.`
+            : (message || `Enter your CEO password before viewing the login for ${user.username}. This does not change the password.`)}
+        </p>
+        {revealed ? (
+          <label>
+            Password
+            <input value={revealed} readOnly />
+          </label>
+        ) : message ? null : (
+          <label>
+            Your password
+            <input
+              type="password"
+              value={ceoPassword}
+              onChange={(event) => setCeoPassword(event.target.value)}
+              autoComplete="current-password"
+              required
+            />
+          </label>
+        )}
+        {error ? <p className="form-error">{error}</p> : null}
+        <div className="modal-actions">
+          {revealed || message ? null : (
+            <button className="primary" type="submit" disabled={busy}>
+              {busy ? "Checking…" : "Verify"}
+            </button>
+          )}
+          <button className="ghost" type="button" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </form>
+    </Modal>
   );
 }
 
@@ -1064,7 +1343,7 @@ function EditUserDialog({ user, ceoUsername, onClose, onSaved }) {
         <p className="lede">
           {user.needsPassword
             ? "This person is listed in HRMS but has no login yet. Set a password of at least 8 characters so they can sign in."
-            : "Update the account status or issue a new password of at least 8 characters. The current password cannot be viewed."}
+            : "Issue a temporary password of at least 8 characters and share it privately. The user must change it the next time they sign in. The current password cannot be viewed."}
         </p>
         {user.role === "ceo" ? null : (
           <label>
@@ -1235,9 +1514,10 @@ function navIconFor(id) {
   if (id.includes("marketing")) return "chart";
   if (id.includes("client") || id === "hrms" || id === "users" || id === "team") return "users";
   if (id.includes("package")) return "box";
-  if (id.includes("sales") || id.includes("follow") || id.includes("lead")) return "trend";
   if (id.includes("payment") || id === "finance") return "card";
   if (id.includes("report") || id.includes("sample")) return "file";
+  if (id.includes("follow") || id.includes("lead")) return "lead";
+  if (id.includes("sales")) return "trend";
   if (id.includes("productivity")) return "chart";
   if (id.includes("activity")) return "clock";
   return "folder";
@@ -1287,6 +1567,15 @@ function NavGlyph({ name }) {
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d="M4.5 8.5 12 4.5l7.5 4v11L12 19.5l-7.5-4v-11Z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
         <path d="M12 4.5v15M4.5 8.5 12 12.5l7.5-4" fill="none" stroke="currentColor" strokeWidth="1.8" />
+      </svg>
+    );
+  }
+  if (name === "lead") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="9" cy="8" r="3" fill="none" stroke="currentColor" strokeWidth="1.8" />
+        <path d="M3.8 19c.7-3.1 2.4-4.6 5.2-4.6s4.5 1.5 5.2 4.6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+        <path d="M16.5 8.5h4M16.5 12h4M16.5 15.5h2.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
       </svg>
     );
   }

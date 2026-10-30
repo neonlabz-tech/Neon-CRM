@@ -1,9 +1,10 @@
 import neonLogo from "./assets/neonlabz-logo.png";
-import { blankClient, clientCodeNumber, formatClientCode, loadClients, nextClientCode, saveClients } from "./clients.js";
+import { blankClient, loadClients, nextClientCode, saveClients } from "./clients.js";
+import { claimClientCode, claimLeadId as reserveLeadId, forgetLeadPhone, leadIdTaken, leadPhoneHolder, noteClientCode, noteLeadId, rememberLeadPhone, suggestLeadId, syncLeadPhones } from "./registry.js";
 import { formatScopeHtml, sanitizeScopeHtml, scopeHasText } from "./richText.js";
 import { loadUsers } from "./crm.js";
 import { invoiceDocumentFromPayment, invoiceDocumentFromQuote } from "./brandDocument.js";
-import { approveProjectInvoice, loadFinance, notifyRole, notifyUser, projectInvoiceFor, queueProjectInvoice } from "./finance.js";
+import { approveProjectInvoice, loadFinance, notifyRole, notifyUser, projectInvoiceFor, queueProjectInvoice, rememberPayingClient } from "./finance.js";
 import { formatPhone } from "./hrms.js";
 import { dataOwner, readAccount, sessionAccount, writeScoped } from "./scope.js";
 import { crmStorage } from "./storage.js";
@@ -11,6 +12,7 @@ import { crmStorage } from "./storage.js";
 const STORAGE_KEY = "neon-crm-sales";
 const PACKAGES_KEY = "neon-crm-packages";
 const INCOMING_KEY = "neon-crm-incoming-projects";
+const PAYING_CLIENTS_KEY = "neon-crm-paying-clients";
 const LEAD_INDEX_KEY = "neon-crm-lead-index";
 export const LEAD_PHONE_EXISTS_MESSAGE = "This phone number already exists in the system.";
 
@@ -269,10 +271,7 @@ export function loadSales() {
       publishIncoming(stored);
       return withPackages(stored);
     }
-    const seeded = blankSales();
-    const session = sessionAccount();
-    if (owner && session?.role !== "ceo" && session?.username === owner) persistSales(seeded);
-    return withPackages(seeded);
+    return withPackages(blankSales());
   } catch {
     return withPackages(blankSales());
   }
@@ -738,9 +737,12 @@ function directoryLeads() {
 function publishLeadDirectory() {
   const harvested = harvestLeadIndex();
   const stored = loadLeadIndex();
+  const ids = { ...stored.ids, ...harvested.ids };
+  Object.keys(ids).forEach((id) => noteLeadId(id));
+  syncLeadPhones(harvested.phones);
   saveLeadIndex({
     sequence: Math.max(harvested.sequence, stored.sequence),
-    ids: { ...stored.ids, ...harvested.ids },
+    ids,
     leads: directoryLeads(),
   });
 }
@@ -785,41 +787,32 @@ function saveLeadIndex(index) {
 function claimLeadId(preferred) {
   const harvested = harvestLeadIndex();
   const stored = loadLeadIndex();
-  const ids = { ...stored.ids, ...harvested.ids };
-  let sequence = Math.max(Number(stored.sequence) || 0, harvested.sequence);
+  Object.keys({ ...stored.ids, ...harvested.ids }).forEach((id) => noteLeadId(id));
+  syncLeadPhones(harvested.phones);
   const wanted = String(preferred || "").trim();
-  let id = wanted && !harvested.ids[wanted] ? wanted : "";
-  if (!id) {
-    do {
-      sequence += 1;
-      id = formatLeadId(sequence);
-    } while (ids[id]);
-  } else {
-    sequence = Math.max(sequence, leadIdNumber(id));
-  }
-  ids[id] = true;
-  saveLeadIndex({ sequence, ids });
+  const free = wanted && !harvested.ids[wanted] && !stored.ids[wanted] && !leadIdTaken(wanted);
+  const id = reserveLeadId(free ? wanted : "");
+  saveLeadIndex({
+    sequence: Math.max(harvested.sequence, stored.sequence, leadIdNumber(id)),
+    ids: { ...stored.ids, ...harvested.ids, [id]: true },
+  });
   return id;
 }
 
 export function nextLeadId() {
   const harvested = harvestLeadIndex();
   const stored = loadLeadIndex();
-  const ids = { ...stored.ids, ...harvested.ids };
-  let sequence = Math.max(Number(stored.sequence) || 0, harvested.sequence);
-  let id;
-  do {
-    sequence += 1;
-    id = formatLeadId(sequence);
-  } while (ids[id]);
-  return id;
+  Object.keys({ ...stored.ids, ...harvested.ids }).forEach((id) => noteLeadId(id));
+  syncLeadPhones(harvested.phones);
+  return suggestLeadId();
 }
 
 export function leadPhoneTaken(phone, exceptId = "") {
   const digits = phoneDigits(phone);
   if (digits.length !== 10) return false;
-  const holder = harvestLeadIndex().phones[digits];
-  return Boolean(holder && holder !== exceptId);
+  const local = harvestLeadIndex().phones[digits];
+  const shared = leadPhoneHolder(phone);
+  return [local, shared].some((holder) => holder && holder !== exceptId);
 }
 
 export function dueLeads(leads, day = todayISO()) {
@@ -984,9 +977,9 @@ export function saveCollectionTarget(data, month, amount) {
   };
 }
 
-export function confirmedCollections(data, month) {
+export function confirmedCollections(data, month, range) {
   return (data.payments || [])
-    .filter((payment) => payment.status === "confirmed" && payment.approval !== "pending" && monthKey(payment.date) === month)
+    .filter((payment) => payment.status === "confirmed" && payment.approval !== "pending" && inReportingPeriod(payment.date, month, range))
     .reduce((sum, payment) => sum + payment.amount, 0);
 }
 
@@ -1137,10 +1130,45 @@ export function salesClientByName(name) {
   return salesClientDirectory().find((item) => item.name.toLowerCase() === key) || null;
 }
 
+function sharedPayingClients() {
+  try {
+    const raw = JSON.parse(crmStorage.getItem(PAYING_CLIENTS_KEY) || "[]");
+    return Array.isArray(raw) ? raw : [];
+  } catch {
+    return [];
+  }
+}
+
+function addPayingClient(byName, next) {
+  const name = String(next?.name || "").trim();
+  if (!name) return;
+  const key = name.toLowerCase();
+  const current = byName.get(key);
+  if (!current) {
+    byName.set(key, {
+      name,
+      code: next.code || "",
+      email: next.email || "",
+      phone: next.phone || "",
+      address: next.address || "",
+    });
+    return;
+  }
+  byName.set(key, {
+    ...current,
+    code: current.code || next.code || "",
+    email: current.email || next.email || "",
+    phone: current.phone || next.phone || "",
+    address: current.address || next.address || "",
+  });
+}
+
 export function payingClientsForPm(username) {
   const user = loadUsers().find((item) => item.active && item.username === username);
   if (!user || user.role !== "pm") return [];
   const byName = new Map();
+  sharedPayingClients().forEach((item) => addPayingClient(byName, item));
+  let sawSalesPayment = false;
   loadUsers()
     .filter((item) => item.active && item.role === "sales")
     .forEach((salesUser) => {
@@ -1149,6 +1177,7 @@ export function payingClientsForPm(username) {
         if (!payment || payment.status === "cancelled") return;
         const approved = payment.approval === "approved" || (payment.status === "confirmed" && payment.approval !== "pending");
         if (!approved) return;
+        sawSalesPayment = true;
         const quote = (sales?.quotes || []).find((item) => item.id === payment.quoteId);
         const name = String(payment.clientName || quote?.client || "").trim();
         if (!name) return;
@@ -1156,27 +1185,18 @@ export function payingClientsForPm(username) {
         const lead = (sales?.leads || []).find((item) => item.id === payment.clientId || item.id === quote?.clientId)
           || (sales?.leads || []).find((item) => String(item.business || "").trim().toLowerCase() === key);
         const details = salesClientByName(name);
-        const next = {
+        addPayingClient(byName, {
           name,
           code: lead?.clientCode || quote?.clientCode || payment.clientCode || "",
           email: details?.email || lead?.email || quote?.email || "",
           phone: details?.phone || lead?.phone || quote?.phone || "",
           address: details?.address || lead?.address || "",
-        };
-        const current = byName.get(key);
-        if (!current) {
-          byName.set(key, next);
-          return;
-        }
-        byName.set(key, {
-          ...current,
-          code: current.code || next.code,
-          email: current.email || next.email,
-          phone: current.phone || next.phone,
-          address: current.address || next.address,
         });
       });
     });
+  if (sessionAccount()?.role === "ceo" && sawSalesPayment) {
+    crmStorage.setItem(PAYING_CLIENTS_KEY, JSON.stringify([...byName.values()]));
+  }
   return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -1253,27 +1273,22 @@ export function convertedPaymentClients(data) {
 }
 
 function nextSalesClientCode(data) {
-  let max = 0;
-  (data?.leads || []).forEach((lead) => {
-    max = Math.max(max, clientCodeNumber(lead.clientCode));
+  (data?.leads || []).forEach((lead) => noteClientCode(lead.clientCode));
+  (data?.quotes || []).forEach((quote) => noteClientCode(quote.clientCode));
+  eachSalesAccount((raw) => {
+    (raw?.leads || []).forEach((lead) => noteClientCode(lead?.clientCode));
+    (raw?.quotes || []).forEach((quote) => noteClientCode(quote?.clientCode));
   });
-  (data?.quotes || []).forEach((quote) => {
-    max = Math.max(max, clientCodeNumber(quote.clientCode));
-  });
-  return formatClientCode(max + 1);
+  return claimClientCode();
 }
 
 export function assignConvertedClientCodes(data) {
-  let max = 0;
-  (data?.leads || []).forEach((lead) => {
-    max = Math.max(max, clientCodeNumber(lead.clientCode));
-  });
   let changed = false;
   const leads = (data?.leads || []).map((lead) => {
+    if (lead.clientCode) noteClientCode(lead.clientCode);
     if (lead.status !== "Converted" || lead.clientCode) return lead;
-    max += 1;
     changed = true;
-    return { ...lead, clientCode: formatClientCode(max) };
+    return { ...lead, clientCode: claimClientCode() };
   });
   return changed ? { ...data, leads } : data;
 }
@@ -1322,6 +1337,12 @@ export function memberConfig(data, username) {
 
 export function monthKey(date) {
   return String(date || "").slice(0, 7);
+}
+
+export function inReportingPeriod(date, month, range) {
+  const value = String(date || "").slice(0, 10);
+  if (range?.from && range?.to) return value >= range.from && value <= range.to;
+  return monthKey(value) === month;
 }
 
 export function confirmedRevenue(data, username, month) {
@@ -1634,6 +1655,9 @@ function submitInvoice(payment, quote) {
 export function setPaymentStatus(data, paymentId, status, receipt) {
   const payment = data.payments.find((item) => item.id === paymentId);
   if (!payment) return { ok: false, error: "That payment was not found." };
+  if (status === "cancelled" && sessionAccount()?.role === "sales") {
+    return { ok: false, error: "Sales admin cannot cancel a payment." };
+  }
   if (status === "confirmed") {
     const quote = locateQuote(data, payment.quoteId);
     const others = reservedAmount(data, payment.quoteId, payment.id);
@@ -1665,6 +1689,130 @@ export function setPaymentStatus(data, paymentId, status, receipt) {
   };
 }
 
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let cell = "";
+  let quoted = false;
+  const source = String(text || "").replace(/^\uFEFF/, "");
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (quoted) {
+      if (char === "\"" && source[index + 1] === "\"") {
+        cell += "\"";
+        index += 1;
+      } else if (char === "\"") {
+        quoted = false;
+      } else {
+        cell += char;
+      }
+    } else if (char === "\"") {
+      quoted = true;
+    } else if (char === ",") {
+      row.push(cell);
+      cell = "";
+    } else if (char === "\n") {
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = "";
+    } else if (char !== "\r") {
+      cell += char;
+    }
+  }
+  if (cell || row.length) {
+    row.push(cell);
+    rows.push(row);
+  }
+  return rows.filter((item) => item.some((value) => String(value).trim()));
+}
+
+function csvDate(value, fallback = todayISO()) {
+  const raw = String(value || "").trim();
+  if (!raw) return fallback;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  const parts = raw.match(/^(\d{1,2})[/. -](\d{1,2})[/. -](\d{4})$/);
+  if (!parts) return fallback;
+  return `${parts[3]}-${parts[2].padStart(2, "0")}-${parts[1].padStart(2, "0")}`;
+}
+
+const LEAD_CSV_FIELDS = {
+  business: ["business", "customer", "business / customer", "business/customer", "name", "customer name"],
+  phone: ["phone", "mobile", "contact number"],
+  date: ["date", "lead date"],
+  source: ["source"],
+  service: ["service", "interested service"],
+  status: ["status", "lead status"],
+  email: ["email", "email address"],
+  address: ["address"],
+  businessType: ["business type", "industry"],
+  next: ["next", "next follow-up", "next follow up"],
+  notes: ["notes", "note"],
+};
+
+function csvHeaderMap(headers) {
+  const map = {};
+  headers.forEach((header, index) => {
+    const key = String(header || "").trim().toLowerCase();
+    Object.entries(LEAD_CSV_FIELDS).forEach(([field, names]) => {
+      if (names.includes(key)) map[field] = index;
+    });
+  });
+  return map.business === undefined ? null : map;
+}
+
+function csvValue(row, map, field, fallback) {
+  if (!map) return row[fallback] || "";
+  const index = map[field];
+  return index === undefined ? "" : row[index] || "";
+}
+
+export function importLeadsFromCsv(data, text, options = {}) {
+  const rows = parseCsv(text);
+  if (!rows.length) return { ok: false, error: "The CSV file has no lead rows." };
+  const map = csvHeaderMap(rows[0]);
+  const body = map ? rows.slice(1) : rows;
+  if (!body.length) return { ok: false, error: "The CSV file has headings but no lead rows." };
+  let current = data;
+  let imported = 0;
+  const skipped = [];
+  body.forEach((row, index) => {
+    const line = (map ? index + 2 : index + 1);
+    const business = String(csvValue(row, map, "business", 0)).trim();
+    if (!business) {
+      skipped.push(`Row ${line} has no customer name.`);
+      return;
+    }
+    const result = saveLead(current, {
+      date: csvDate(csvValue(row, map, "date", 2)),
+      business,
+      phone: csvValue(row, map, "phone", 1),
+      source: csvValue(row, map, "source", 3),
+      service: csvValue(row, map, "service", 4),
+      status: csvValue(row, map, "status", 5) || "New",
+      email: csvValue(row, map, "email", 6),
+      address: csvValue(row, map, "address", 7),
+      next: csvDate(csvValue(row, map, "next", 8), ""),
+      notes: csvValue(row, map, "notes", 9),
+      businessType: csvValue(row, map, "businessType", 10),
+      executive: options.executive || "",
+    });
+    if (!result.ok) {
+      skipped.push(`Row ${line}: ${result.error}`);
+      return;
+    }
+    current = result.data;
+    imported += 1;
+  });
+  if (!imported) return { ok: false, error: skipped[0] || "No leads were imported." };
+  const skipNote = skipped.length ? ` Skipped ${skipped.length}: ${skipped.slice(0, 3).join(" ")}` : "";
+  return {
+    ok: true,
+    data: current,
+    message: `Imported ${imported} lead${imported === 1 ? "" : "s"}.${skipNote}`,
+  };
+}
+
 export function saveLead(data, draft) {
   const business = String(draft.business || draft.name || "").trim();
   if (!business) return { ok: false, error: "Business / customer name is required." };
@@ -1676,7 +1824,8 @@ export function saveLead(data, draft) {
   if (digits.length && digits.length !== 10) {
     return { ok: false, error: "Enter a 10-digit phone number." };
   }
-  if (digits.length === 10 && leadPhoneTaken(phone, existing?.id || "")) {
+  const samePhone = existing && phoneDigits(existing.phone) === digits;
+  if (digits.length === 10 && !samePhone && leadPhoneTaken(phone, existing?.id || "")) {
     return { ok: false, error: LEAD_PHONE_EXISTS_MESSAGE };
   }
   const email = String(draft.email || "").trim();
@@ -1730,6 +1879,11 @@ export function saveLead(data, draft) {
     next.next = lastCall.next || next.next;
   }
   if (next.status === "Converted" && !next.clientCode) next.clientCode = nextSalesClientCode(data);
+  if (next.clientCode) noteClientCode(next.clientCode);
+  const phoneAccepted = rememberLeadPhone(next.id, next.phone);
+  if (digits.length === 10 && !samePhone && !phoneAccepted) {
+    return { ok: false, error: LEAD_PHONE_EXISTS_MESSAGE };
+  }
   const currentLeads = Array.isArray(data.leads) ? data.leads : [];
   const leads = existing
     ? currentLeads.map((item) => (item.id === existing.id ? next : item))
@@ -1752,6 +1906,7 @@ export function deleteLead(data, id) {
   const payments = (data.payments || []).filter((payment) => payment.clientId === id);
   if (quotes.length) return { ok: false, error: "This lead already has a quotation. Remove the quotation first." };
   if (payments.length) return { ok: false, error: "This lead already has a payment. Cancel the payment first." };
+  forgetLeadPhone(id);
   const saved = {
     ...data,
     leads: (data.leads || []).filter((item) => item.id !== id),
@@ -2196,7 +2351,17 @@ export function ceoSetSaleStatus(row, status, patch = {}) {
           : item
       )),
     });
-    notifyRole("pm", `The CEO confirmed ${payment.clientName || quote?.client || "a client"}. This client is now available under Clients.`);
+    const clientName = payment.clientName || quote?.client || "";
+    const lead = (data.leads || []).find((item) => item.id === payment.clientId || item.id === quote?.clientId)
+      || (data.leads || []).find((item) => String(item.business || "").trim().toLowerCase() === String(clientName).trim().toLowerCase());
+    rememberPayingClient({
+      name: clientName,
+      code: payment.clientCode || lead?.clientCode || quote?.clientCode || "",
+      email: lead?.email || quote?.email || "",
+      phone: lead?.phone || quote?.phone || "",
+      address: lead?.address || quote?.address || "",
+    });
+    notifyRole("pm", `The CEO confirmed ${clientName || "a client"}. This client is now available under Clients.`);
     return { ok: true };
   }
   persistSalesAccount(row.owner, {

@@ -33,7 +33,8 @@ import { isVisibleToMarketing, marketingFieldsFromPm, marketingServiceClients, p
 import { notifyUser } from "./finance.js";
 import { teamMembersFor } from "./hrms.js";
 import { KanbanBoard } from "./Kanban.jsx";
-import { assignMarketingTeam, blankMilestone, canonicalProjectCode, canManageDepartment, deleteMarketingMilestone, marketingProjects, milestoneDepartment, milestoneTasksComplete, nextCompanyProjectCode, normalizeAssignees, projectCodeTaken, removeMarketingProjectFromDoc, saveMarketingMilestone, saveMarketingProjectDates, syncOwnerProjectProgress, todayIso, upsertMarketingProjectFromDoc } from "./projects.js";
+import { claimProjectCode } from "./registry.js";
+import { assignMarketingTeam, blankMilestone, canonicalProjectCode, canManageDepartment, companyProjectCodes, deleteMarketingMilestone, marketingProjects, milestoneDepartment, milestoneTasksComplete, normalizeAssignees, projectCodeTaken, removeMarketingProjectFromDoc, saveMarketingMilestone, saveMarketingProjectDates, suggestCompanyProjectCode, syncOwnerProjectProgress, todayIso, upsertMarketingProjectFromDoc } from "./projects.js";
 import { ProjectPackagesBoard } from "./Sales.jsx";
 import { BOARD_COLUMNS, TASK_PRIORITIES, TASK_STATUSES, blankTask, cleanHtml, employeeLaneStatus, managerBoardColumns, nextTaskCode, saveOwnerTasks, stampTaskStatus, tasksForOwner } from "./tasks.js";
 import { sessionAccount } from "./scope.js";
@@ -1193,6 +1194,15 @@ function InfoDocs({ data, commit, canEdit }) {
     if (projectCodeTaken(projectId, { exceptMarketingId: client.id, clientName: client.brandName })) {
       return "That project ID is already used.";
     }
+    const previousId = data.clients.find((item) => item.id === client.id)?.projectId || "";
+    const sameId = previousId && (canonicalProjectCode(previousId) || previousId) === projectId;
+    const linked = companyProjectCodes(client.id).some((item) => {
+      const value = (canonicalProjectCode(item) || String(item || "").trim()).toLowerCase();
+      return value === projectId.toLowerCase();
+    });
+    if (!sameId && !linked && !claimProjectCode(projectId, { exact: true })) {
+      return "That project ID is already used.";
+    }
     const next = { ...client, projectId };
     const exists = data.clients.some((item) => item.id === client.id);
     const nextData = {
@@ -1220,7 +1230,7 @@ function InfoDocs({ data, commit, canEdit }) {
         {canEdit ? (
           <button className="primary" type="button" onClick={() => setEditing({
             ...blankClient(),
-            projectId: nextCompanyProjectCode(data.clients.map((item) => item.projectId)),
+            projectId: suggestCompanyProjectCode(data.clients.map((item) => item.projectId)),
           })}>
             Add project
           </button>

@@ -96,3 +96,176 @@ test("user sync cannot delete the CEO and does not return passwords", async () =
   assert.ok(sync.data.users.some((user) => user.username === "CEO001"));
   assert.ok(sync.data.users.every((user) => user.password === undefined));
 });
+
+test("forgot password uses the same reply for known and unknown accounts", async () => {
+  const bcrypt = (await import("bcryptjs")).default;
+  const existing = await User.findOne({ username: "SD001" });
+  if (!existing) {
+    await User.create({
+      username: "SD001",
+      role: "sales",
+      passwordHash: await bcrypt.hash("sales123", 10),
+      passwordSource: "updated",
+      active: true,
+    });
+  }
+  const unknown = await json("/api/auth/forgot", { method: "POST", body: { username: "PM999" } });
+  const known = await json("/api/auth/forgot", { method: "POST", body: { username: "SD001" } });
+  assert.equal(unknown.res.status, 200);
+  assert.equal(known.res.status, 200);
+  assert.equal(unknown.data.message, known.data.message);
+  assert.equal(unknown.data.password, undefined);
+  assert.equal(known.data.username, undefined);
+  const listed = await json("/api/auth/reset-requests", { token: ceoToken });
+  assert.equal(listed.res.status, 200);
+  assert.ok(listed.data.requests.some((item) => item.username === "SD001"));
+});
+
+test("viewing a password requires the CEO password and never returns one", async () => {
+  const denied = await json("/api/users/password-view", {
+    method: "POST",
+    token: ceoToken,
+    body: { username: "SD001", password: "wrong" },
+  });
+  assert.equal(denied.res.status, 401);
+  assert.equal(denied.data.password, undefined);
+  const checked = await json("/api/users/password-view", {
+    method: "POST",
+    token: ceoToken,
+    body: { username: "SD001", password: "ceo12345" },
+  });
+  assert.equal(checked.res.status, 200);
+  assert.equal(checked.data.viewable, false);
+  assert.equal(checked.data.password, undefined);
+  const issued = await json("/api/users", {
+    method: "POST",
+    token: ceoToken,
+    body: { username: "SD001", password: "issued123", active: true },
+  });
+  assert.equal(issued.res.status, 200);
+  const viewed = await json("/api/users/password-view", {
+    method: "POST",
+    token: ceoToken,
+    body: { username: "SD001", password: "ceo12345" },
+  });
+  assert.equal(viewed.res.status, 200);
+  assert.equal(viewed.data.viewable, true);
+  assert.equal(viewed.data.password, "issued123");
+  assert.equal(viewed.data.passwordHash, undefined);
+});
+
+test("CEO profile email is the password recovery address", async () => {
+  await User.updateOne({ username: "CEO001" }, { $set: { email: "neonlabz@gmail.com", fullName: "Neon CEO" } });
+  const profile = await json("/api/profile", { token: ceoToken });
+  assert.equal(profile.res.status, 200);
+  assert.equal(profile.data.profile.email, "neonlabz@gmail.com");
+  assert.equal(profile.data.profile.password, undefined);
+  assert.equal(profile.data.profile.passwordHash, undefined);
+  const saved = await json("/api/profile", {
+    method: "PUT",
+    token: ceoToken,
+    body: { fullName: "Neon CEO", email: "neonlabz@gmail.com", phone: "", address: "" },
+  });
+  assert.equal(saved.res.status, 200);
+  assert.equal(saved.data.profile.email, "neonlabz@gmail.com");
+  const reset = await json("/api/auth/forgot", { method: "POST", body: { username: "neonlabz@gmail.com" } });
+  assert.equal(reset.res.status, 503);
+  assert.match(reset.data.error, /could not be sent/i);
+});
+
+test("a CEO reset link is single use", async () => {
+  const { PasswordReset } = await import("./models.js");
+  const { hashToken } = await import("./passwordReset.js");
+  const token = "test-reset-token";
+  await PasswordReset.create({
+    username: "CEO001",
+    tokenHash: hashToken(token),
+    purpose: "ceo-link",
+    expiresAt: new Date(Date.now() + 60 * 1000),
+    status: "open",
+  });
+  const reset = await json("/api/auth/reset", {
+    method: "POST",
+    body: { token, password: "newceo123" },
+  });
+  assert.equal(reset.res.status, 200);
+  const again = await json("/api/auth/reset", {
+    method: "POST",
+    body: { token, password: "another123" },
+  });
+  assert.equal(again.res.status, 400);
+  const login = await json("/api/auth/login", { method: "POST", body: { username: "CEO001", password: "newceo123" } });
+  assert.equal(login.res.status, 200);
+});
+
+test("lead, client, and project IDs and lead phones cannot be reserved twice", async () => {
+  const bcrypt = (await import("bcryptjs")).default;
+  const sales = await User.findOne({ username: "SD001" });
+  if (!sales) {
+    await User.create({
+      username: "SD001",
+      role: "sales",
+      passwordHash: await bcrypt.hash("sales123", 10),
+      passwordSource: "updated",
+      active: true,
+    });
+  }
+  await User.updateOne({ username: "CEO001" }, { $set: { passwordHash: await bcrypt.hash("ceo12345", 10) } });
+  const signedIn = await json("/api/auth/login", { method: "POST", body: { username: "SD001", password: "sales123" } });
+  if (signedIn.res.status !== 200) {
+    const issued = await json("/api/auth/login", { method: "POST", body: { username: "SD001", password: "issued123" } });
+    assert.equal(issued.res.status, 200);
+    signedIn.data.token = issued.data.token;
+  }
+  const token = signedIn.data.token;
+  const [first, second] = await Promise.all([
+    json("/api/registry/claim", { method: "POST", token, body: { book: "leads" } }),
+    json("/api/registry/claim", { method: "POST", token, body: { book: "leads" } }),
+  ]);
+  assert.equal(first.res.status, 200);
+  assert.equal(second.res.status, 200);
+  assert.match(first.data.code, /^LEAD-\d{4}$/);
+  assert.match(second.data.code, /^LEAD-\d{4}$/);
+  assert.notEqual(first.data.code, second.data.code);
+  const client = await json("/api/registry/claim", { method: "POST", token, body: { book: "clients" } });
+  assert.equal(client.res.status, 200);
+  assert.match(client.data.code, /^CLI\d{3}$/);
+  const again = await json("/api/registry/claim", { method: "POST", token, body: { book: "leads", preferred: first.data.code, exact: true } });
+  assert.equal(again.res.status, 409);
+  const project = await json("/api/registry/claim", { method: "POST", token, body: { book: "projects", preferred: "NPRJ001", exact: true } });
+  assert.equal(project.res.status, 200);
+  assert.equal(project.data.code, "NPRJ001");
+  const duplicateProject = await json("/api/registry/claim", { method: "POST", token, body: { book: "projects", preferred: "nprj001", exact: true } });
+  assert.equal(duplicateProject.res.status, 409);
+  const phone = "0770000000";
+  const reserved = await json("/api/registry/phone", { method: "POST", token, body: { leadId: first.data.code, phone } });
+  assert.equal(reserved.res.status, 200);
+  const taken = await json("/api/registry/phone", { method: "POST", token, body: { leadId: "LEAD-9999", phone } });
+  assert.equal(taken.res.status, 409);
+  const holder = await json(`/api/registry/phone?phone=${phone}`, { token });
+  assert.equal(holder.res.status, 200);
+  assert.equal(holder.data.holder, first.data.code);
+  const kept = await json("/api/stores/batch", {
+    method: "PUT",
+    token,
+    body: { items: [{ key: "neon-crm-registry", owner: "company", data: { leads: { sequence: 1, ids: { "LEAD-0008": true } }, phones: {} } }] },
+  });
+  assert.equal(kept.res.status, 200);
+  const stillHeld = await json(`/api/registry/phone?phone=${phone}`, { token });
+  assert.equal(stillHeld.data.holder, first.data.code);
+  const employee = await json("/api/auth/login", { method: "POST", body: { username: "EMP001", password: "employee1" } });
+  if (employee.res.status !== 200) {
+    await User.create({
+      username: "EMP001",
+      role: "employee",
+      passwordHash: await bcrypt.hash("employee1", 10),
+      passwordSource: "updated",
+      active: true,
+    });
+  }
+  const staff = employee.res.status === 200
+    ? employee
+    : await json("/api/auth/login", { method: "POST", body: { username: "EMP001", password: "employee1" } });
+  const denied = await json("/api/registry/claim", { method: "POST", token: staff.data.token, body: { book: "leads" } });
+  assert.equal(denied.res.status, 403);
+});

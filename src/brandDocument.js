@@ -1,4 +1,4 @@
-import neonMark from "./assets/neonlabz-doc-mark.png";
+import neonLogo from "./assets/neonlabz-invoice-logo.png";
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({
@@ -124,7 +124,6 @@ export function renderBrandDocument({
   const notice = invoice && approved
     ? "PAYMENT APPROVED — ISSUED INVOICE"
     : "DESIGN PREVIEW — NOT AN ISSUED INVOICE";
-  const hero = invoice ? "" : `<div class="hero"><span></span><span></span></div>`;
   const eyebrow = "SERVICE PACKAGE / INVOICE PREVIEW";
   const headerAside = invoice
     ? `<p>Turning Ideas into Digital Reality</p>`
@@ -139,15 +138,12 @@ export function renderBrandDocument({
   button.print { margin: 16px; padding: 10px 14px; border: 0; border-radius: 8px; background: #873CFF; color: #fff; font-weight: 700; cursor: pointer; }
   .sheet { width: 210mm; min-height: 297mm; margin: 0 auto 24px; background: #fff; box-sizing: border-box; overflow: hidden; position: relative; box-shadow: 0 18px 48px rgba(7,12,43,.28); }
   .sheet::before { content: ""; display: block; height: 5px; background: #873CFF; }
-  .head { display: flex; justify-content: space-between; align-items: center; padding: 22px 40px; min-height: 84px; box-sizing: border-box; background: #fff; }
-  .brand { display: flex; align-items: center; gap: 10px; }
-  .brand img { height: 42px; width: auto; display: block; }
-  .brand-name { font-size: 22px; font-weight: 800; letter-spacing: -.04em; line-height: 1; color: #0B1026; }
-  .head-copy { text-align: right; font-size: 11px; color: #6B7280; line-height: 1.45; }
+  .head { display: flex; justify-content: space-between; align-items: center; padding: 18px 40px; min-height: 84px; box-sizing: border-box; background: #0B1026; }
+  .brand { display: flex; align-items: center; }
+  .brand img { height: 36px; width: auto; display: block; }
+  .head-copy { text-align: right; font-size: 11px; color: #D1D5DB; line-height: 1.45; }
   .head-copy p { margin: 0; }
   .rule { height: 2px; background: #C412FC; }
-  .hero { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 18px 36px 0; }
-  .hero span { display: block; height: 52px; border-radius: 6px; background: #EEF0F6; }
   .pad { padding: 28px 40px 18px; }
   .kicker { margin: 0 0 10px; color: #873CFF; font-size: 10px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; }
   h1 { margin: 0 0 8px; font-size: 44px; line-height: .95; letter-spacing: -.04em; color: #0B1026; font-weight: 800; }
@@ -182,15 +178,15 @@ export function renderBrandDocument({
   .foot .right { text-align: right; }
   .page { display: block; margin-top: 8px; color: #9CA3AF; letter-spacing: .08em; }
   .seal { position: absolute; right: 42px; top: 248px; width: 132px; height: 132px; z-index: 3; overflow: visible; }
-  .is-invoice .head { background: #fff; }
-  .is-invoice .head-copy { color: #6B7280; }
+  .is-invoice .head { background: #0B1026; }
+  .is-invoice .head-copy { color: #D1D5DB; }
   .is-invoice .meta article { padding: 0 18px 0 0; }
   .is-invoice .meta article + article { border-left: 1px solid #E5E7EB; padding-left: 28px; }
   .is-invoice th { background: #F3F5FA; color: #6B7280; }
   .is-invoice td { border-bottom: 1px solid #EEF0F5; }
   .is-invoice td:last-child { font-weight: 700; }
-  .is-package .head { background: #F7F8FC; color: #4B5568; }
-  .is-package .head-copy { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; font-style: normal; }
+  .is-package .head { background: #0B1026; color: #D1D5DB; }
+  .is-package .head-copy { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; font-style: normal; color: #D1D5DB; }
   .is-package .meta { background: #F7F8FC; border-radius: 16px; overflow: hidden; }
   .is-package .meta article { padding: 16px 18px; }
   .is-package .meta article + article { border-left: 1px solid #E4E7F1; }
@@ -208,11 +204,10 @@ export function renderBrandDocument({
   <button class="print" type="button" onclick="window.print()">Print / Save as PDF</button>
   <article class="sheet ${theme}">
     <header class="head">
-      <div class="brand"><img src="${neonMark}" alt="" /><span class="brand-name">NeonLabz.</span></div>
+      <div class="brand"><img src="${neonLogo}" alt="NeonLabz" /></div>
       <div class="head-copy">${headerAside}</div>
     </header>
     <div class="rule"></div>
-    ${hero}
     <div class="pad">
       ${stamp}
       <p class="kicker">${eyebrow}</p>

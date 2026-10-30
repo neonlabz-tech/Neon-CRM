@@ -326,20 +326,25 @@ function RecordFields({ tab, draft, setDraft, data }) {
 function Register({ tab, rows, data, onEdit, onDelete, onAddMember, onEditDepartment, onDeleteDepartment }) {
   if (tab === "employees") {
     return (
-      <div className="stack">
-        {departmentsOf(data).length === 0 ? <p className="empty-copy">No departments yet. Add a department, then add an admin or a team member inside it.</p> : departmentsOf(data).map((department) => {
+      <div className="stack dept-list">
+        {departmentsOf(data).length === 0 ? <p className="empty-copy">No departments yet. Add a department, then add an admin or a team member inside it.</p> : departmentsOf(data).map((department, index) => {
           const people = rows.filter((employee) => employee.department === department.id);
           const occupied = data.employees.some((employee) => employee.department === department.id);
+          const count = people.length;
           return (
-            <section key={department.id}>
+            <section key={department.id} className={`dept-card tone-${index % 3}`}>
               <div className="dept-head">
-                <div>
-                  <h3>{department.name}</h3>
+                <div className="dept-title">
+                  <span className="dept-mark" aria-hidden="true">{initials(department.name)}</span>
+                  <div>
+                    <h3>{department.name}</h3>
+                    <p>{count} {count === 1 ? "member" : "members"}</p>
+                  </div>
                 </div>
-                <div className="icon-actions">
-                  <button className="ghost" type="button" onClick={() => onAddMember(department.id)}>Add member</button>
-                  <button className="ghost" type="button" onClick={() => onEditDepartment(department)}>Edit</button>
-                  {occupied ? null : <button className="ghost" type="button" onClick={() => onDeleteDepartment(department)}>Delete</button>}
+                <div className="dept-actions">
+                  <button className="dept-add" type="button" onClick={() => onAddMember(department.id)}>Add member</button>
+                  <button className="dept-edit" type="button" onClick={() => onEditDepartment(department)}>Edit</button>
+                  {occupied ? null : <button className="dept-delete" type="button" onClick={() => onDeleteDepartment(department)}>Delete</button>}
                 </div>
               </div>
               {people.length === 0 ? <p className="empty-copy">No employees in this department.</p> : (

@@ -1,8 +1,11 @@
+import { readSession } from "./api.js";
 import { loadUsers } from "./crm.js";
+import { sessionAccount } from "./scope.js";
 import { crmStorage } from "./storage.js";
 
 const STORAGE_KEY = "neon-crm-finance";
 const NOTICES_KEY = "neon-crm-notices";
+const PAYING_CLIENTS_KEY = "neon-crm-paying-clients";
 export const NOTICES_CHANGED = "neon-crm-notices";
 
 export const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -241,7 +244,37 @@ function normalizeProjectInvoice(item) {
   };
 }
 
+function postProjectInvoice(draft) {
+  if (typeof XMLHttpRequest === "undefined") return null;
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/finance/project-invoices", false);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader("Content-Type", "application/json");
+    const token = readSession()?.token || "";
+    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    xhr.send(JSON.stringify(draft));
+    if (xhr.status < 200 || xhr.status >= 300) return null;
+    const data = JSON.parse(xhr.responseText || "{}");
+    return normalizeProjectInvoice(data.invoice);
+  } catch {
+    return null;
+  }
+}
+
+function rememberProjectInvoice(invoice) {
+  const data = loadFinance();
+  if (data.projectInvoices.some((item) => item.paymentId === invoice.paymentId && item.salesOwner === invoice.salesOwner)) return;
+  crmStorage.keep(STORAGE_KEY, JSON.stringify({ ...data, projectInvoices: [invoice, ...data.projectInvoices] }));
+}
+
 export function queueProjectInvoice(draft) {
+  const remote = postProjectInvoice(draft);
+  if (remote) {
+    rememberProjectInvoice(remote);
+    return remote;
+  }
+  if (sessionAccount()?.role === "sales") return null;
   const data = loadFinance();
   const existing = data.projectInvoices.find((item) => item.paymentId === draft.paymentId && item.salesOwner === draft.salesOwner);
   if (existing) return existing;
@@ -297,16 +330,63 @@ export function invoicesForUser(username, role) {
   return [];
 }
 
+export function rememberPayingClient(record) {
+  const name = String(record?.name || "").trim();
+  if (!name) return;
+  let list = [];
+  try {
+    const raw = JSON.parse(crmStorage.getItem(PAYING_CLIENTS_KEY) || "[]");
+    if (Array.isArray(raw)) list = raw;
+  } catch {
+    list = [];
+  }
+  const next = {
+    name,
+    code: String(record.code || "").trim(),
+    email: String(record.email || "").trim(),
+    phone: String(record.phone || "").trim(),
+    address: String(record.address || "").trim(),
+  };
+  const key = name.toLowerCase();
+  const index = list.findIndex((item) => String(item?.name || "").trim().toLowerCase() === key);
+  if (index >= 0) {
+    const current = list[index];
+    list[index] = {
+      ...current,
+      code: current.code || next.code,
+      email: current.email || next.email,
+      phone: current.phone || next.phone,
+      address: current.address || next.address,
+    };
+  } else {
+    list.push(next);
+  }
+  crmStorage.setItem(PAYING_CLIENTS_KEY, JSON.stringify(list));
+}
+
 function markSalesPaymentApproved(salesOwner, paymentId) {
   if (!salesOwner || !paymentId) return;
   const key = `neon-crm-sales:${salesOwner}`;
   try {
     const raw = JSON.parse(crmStorage.getItem(key) || "null");
     if (!raw || !Array.isArray(raw.payments)) return;
-    raw.payments = raw.payments.map((payment) => (
-      payment.id === paymentId ? { ...payment, status: "confirmed", approval: "approved" } : payment
+    const payment = raw.payments.find((item) => item.id === paymentId);
+    raw.payments = raw.payments.map((item) => (
+      item.id === paymentId ? { ...item, status: "confirmed", approval: "approved" } : item
     ));
     crmStorage.setItem(key, JSON.stringify(raw));
+    if (!payment) return;
+    const quote = (raw.quotes || []).find((item) => item.id === payment.quoteId);
+    const clientName = String(payment.clientName || quote?.client || "").trim();
+    const lead = (raw.leads || []).find((item) => item.id === payment.clientId || item.id === quote?.clientId)
+      || (raw.leads || []).find((item) => String(item.business || "").trim().toLowerCase() === clientName.toLowerCase());
+    rememberPayingClient({
+      name: clientName,
+      code: payment.clientCode || lead?.clientCode || quote?.clientCode || "",
+      email: lead?.email || quote?.email || "",
+      phone: lead?.phone || quote?.phone || "",
+      address: lead?.address || quote?.address || "",
+    });
   } catch {
     // The finance approval is already stored. The sales row can be refreshed on the next payment edit.
   }

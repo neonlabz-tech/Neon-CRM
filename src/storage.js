@@ -8,6 +8,8 @@ const SHARED_KEYS = new Set([
   "neon-crm-notices",
   "neon-crm-lead-index",
   "neon-crm-incoming-projects",
+  "neon-crm-paying-clients",
+  "neon-crm-registry",
   "neon-crm-ceo-sales",
   "neon-crm-users",
 ]);
@@ -46,7 +48,7 @@ export async function flushStores() {
   dirty.clear();
   flushing = true;
   try {
-    await api("/api/stores/batch", {
+    const saved = await api("/api/stores/batch", {
       method: "PUT",
       body: {
         items: keys.map((fullKey) => {
@@ -62,8 +64,13 @@ export async function flushStores() {
         }),
       },
     });
+    const skipped = new Set((saved.rejected || []).map((item) => storeKey(item.key, item.owner)));
+    skipped.forEach((key) => dirty.delete(key));
   } catch (error) {
-    keys.forEach((key) => dirty.add(key));
+    const skipped = new Set((error.rejected || []).map((item) => storeKey(item.key, item.owner)));
+    keys.forEach((key) => {
+      if (!skipped.has(key)) dirty.add(key);
+    });
     console.error("Could not save CRM data.", error);
   } finally {
     flushing = false;
@@ -79,6 +86,9 @@ export const crmStorage = {
     memory.set(String(key), String(value));
     dirty.add(String(key));
     scheduleFlush();
+  },
+  keep(key, value) {
+    memory.set(String(key), String(value));
   },
   removeItem(key) {
     memory.delete(String(key));
