@@ -704,30 +704,38 @@ function ProjectDialog({ project, clients = [], own = false, onClose, onSave }) 
 }
 
 function ProjectRead({ project, onClose }) {
+  const technical = normalizeAssignees(project.assignees).join(", ") || "—";
+  const marketing = normalizeAssignees(project.marketingAssignees).join(", ") || "—";
   return (
     <Modal onClose={onClose}>
-      <div className="modal">
-        <p className="kicker">Project</p>
-        <h2>{project.name}</h2>
-        <ul>
-          <li>Type: {TYPE_LABEL[project.type] || "—"}</li>
-          <li>Client: {project.client || "—"}</li>
-          <li>Package: {project.packageName || "—"}</li>
-          <li>Quotation: {project.quoteNumber || "—"}</li>
-          <li>Email: {project.email || "—"}</li>
-          <li>Phone: {project.phone || "—"}</li>
-          <li>Address: {project.address || "—"}</li>
-          <li>Technical team: {normalizeAssignees(project.assignees).join(", ") || "—"}</li>
-          <li>Marketing team: {normalizeAssignees(project.marketingAssignees).join(", ") || "—"}</li>
-          <li>Status: {STATUS_LABEL[project.status]}</li>
-          <li>Start: {formatDate(project.startDate)}</li>
-          <li>Due: {formatDate(project.dueDate)}</li>
+      <section className="modal sheet project-read">
+        <header className="project-read-head">
+          <div>
+            <p className="kicker">{project.code || "Project"}</p>
+            <h2>{project.name}</h2>
+            <p className="project-read-type">{TYPE_LABEL[project.type] || "Project"}{project.client ? ` · ${project.client}` : ""}</p>
+          </div>
+          <span className={`project-status ${project.status || "in-progress"}`}>{STATUS_LABEL[project.status] || "In progress"}</span>
+        </header>
+        <ul className="client-facts">
+          <li><span>Package</span><strong>{project.packageName || "—"}</strong></li>
+          <li><span>Quotation</span><strong>{project.quoteNumber || "—"}</strong></li>
+          <li><span>Email</span><strong>{project.email || "—"}</strong></li>
+          <li><span>Phone</span><strong>{project.phone || "—"}</strong></li>
+          <li><span>Technical team</span><strong>{technical}</strong></li>
+          <li><span>Marketing team</span><strong>{marketing}</strong></li>
+          <li><span>Start</span><strong>{formatDate(project.startDate)}</strong></li>
+          <li><span>Due</span><strong>{formatDate(project.dueDate)}</strong></li>
+          <li className="span-row"><span>Address</span><strong>{project.address || "—"}</strong></li>
         </ul>
-        <p>{project.description || "No description."}</p>
+        <section className="project-read-note">
+          <span>Description</span>
+          <p>{project.description || "No description."}</p>
+        </section>
         <div className="modal-actions">
           <button className="ghost" type="button" onClick={onClose}>Close</button>
         </div>
-      </div>
+      </section>
     </Modal>
   );
 }

@@ -1,4 +1,6 @@
+import { readSession } from "./api.js";
 import { loadUsers } from "./crm.js";
+import { sessionAccount } from "./scope.js";
 import { crmStorage } from "./storage.js";
 
 const STORAGE_KEY = "neon-crm-finance";
@@ -242,7 +244,37 @@ function normalizeProjectInvoice(item) {
   };
 }
 
+function postProjectInvoice(draft) {
+  if (typeof XMLHttpRequest === "undefined") return null;
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/finance/project-invoices", false);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader("Content-Type", "application/json");
+    const token = readSession()?.token || "";
+    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    xhr.send(JSON.stringify(draft));
+    if (xhr.status < 200 || xhr.status >= 300) return null;
+    const data = JSON.parse(xhr.responseText || "{}");
+    return normalizeProjectInvoice(data.invoice);
+  } catch {
+    return null;
+  }
+}
+
+function rememberProjectInvoice(invoice) {
+  const data = loadFinance();
+  if (data.projectInvoices.some((item) => item.paymentId === invoice.paymentId && item.salesOwner === invoice.salesOwner)) return;
+  crmStorage.keep(STORAGE_KEY, JSON.stringify({ ...data, projectInvoices: [invoice, ...data.projectInvoices] }));
+}
+
 export function queueProjectInvoice(draft) {
+  const remote = postProjectInvoice(draft);
+  if (remote) {
+    rememberProjectInvoice(remote);
+    return remote;
+  }
+  if (sessionAccount()?.role === "sales") return null;
   const data = loadFinance();
   const existing = data.projectInvoices.find((item) => item.paymentId === draft.paymentId && item.salesOwner === draft.salesOwner);
   if (existing) return existing;

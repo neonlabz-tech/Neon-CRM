@@ -105,18 +105,18 @@ export function NotificationBell() {
                 <p>{item.text}</p>
                 <small>{formatNoticeTime(item.created)}</small>
                 <div className="icon-actions">
-                  {sessionAccount()?.role === "ceo" && invoice && invoice.approval !== "approved" ? (
-                    <button
-                      className="primary"
-                      type="button"
-                      onClick={() => {
-                        openCeoSalesApprovals({ paymentId: invoice.paymentId, owner: invoice.salesOwner });
-                        setOpen(false);
-                      }}
-                    >
-                      Review in Sales
-                    </button>
-                  ) : null}
+                {sessionAccount()?.role === "ceo" && ((invoice && invoice.approval !== "approved") || item.invoiceId) ? (
+                  <button
+                    className="primary"
+                    type="button"
+                    onClick={() => {
+                      openCeoSalesApprovals({ paymentId: invoice?.paymentId || "", owner: invoice?.salesOwner || "" });
+                      setOpen(false);
+                    }}
+                  >
+                    Review in Sales
+                  </button>
+                ) : null}
                   {invoice?.approval === "approved" ? (
                     <button
                       className="primary"

@@ -8,6 +8,7 @@ export const SHARED_KEYS = new Set([
   "neon-crm-lead-index",
   "neon-crm-incoming-projects",
   "neon-crm-paying-clients",
+  "neon-crm-registry",
   "neon-crm-ceo-sales",
 ]);
 
@@ -19,6 +20,7 @@ const CEO_WRITE = new Set([
 ]);
 
 const SALES_WRITE = new Set(["neon-crm-lead-index", "neon-crm-incoming-projects"]);
+const REGISTRY_WRITE = new Set(["neon-crm-registry"]);
 const OPEN_WRITE = new Set(["neon-crm-notices"]);
 
 const CEO_READ_ONLY = new Set(["neon-crm-finance", "neon-crm-ceo-sales"]);
@@ -46,6 +48,7 @@ export function canWriteStore(user, key, owner) {
   if (storeOwner === user.username) return true;
   if (storeOwner !== COMPANY) return false;
   if (OPEN_WRITE.has(key)) return true;
+  if (REGISTRY_WRITE.has(key)) return user.role === "sales" || user.role === "pm" || user.role === "marketing";
   if (SALES_WRITE.has(key)) return user.role === "sales" || user.role === "ceo";
   if (CEO_WRITE.has(key)) return false;
   return false;

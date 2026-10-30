@@ -37,7 +37,7 @@ import { BackButton } from "./BackButton.jsx";
 import { NotificationBell } from "./Notifications.jsx";
 import { CeoProfile } from "./CeoProfile.jsx";
 import neonLogo from "./assets/neonlabz-logo.png";
-import neonMark from "./assets/neonlabz-mark.png";
+import sidebarLogo from "./assets/neonlabz-sidebar-logo.png";
 
 function resetTokenFromLocation() {
   const href = window.location.href;
@@ -521,8 +521,7 @@ function Shell({ session, onSignOut }) {
       <aside className="sidebar" id="app-sidebar" aria-hidden={narrow && !menuOpen} inert={narrow && !menuOpen ? true : undefined}>
         <div className="sidebar-brand">
           <div className="sidebar-lockup">
-            <img className="sidebar-mark" src={neonMark} alt="" />
-            <span className="sidebar-wordmark">NeonLabz<i>.</i></span>
+            <img className="sidebar-logo" src={sidebarLogo} alt="NeonLabz" />
           </div>
           <button className="sidebar-close" type="button" aria-label="Close menu" onClick={() => setMenuOpen(false)}>
             <CloseMenuIcon />
@@ -1515,9 +1514,10 @@ function navIconFor(id) {
   if (id.includes("marketing")) return "chart";
   if (id.includes("client") || id === "hrms" || id === "users" || id === "team") return "users";
   if (id.includes("package")) return "box";
-  if (id.includes("sales") || id.includes("follow") || id.includes("lead")) return "trend";
   if (id.includes("payment") || id === "finance") return "card";
   if (id.includes("report") || id.includes("sample")) return "file";
+  if (id.includes("follow") || id.includes("lead")) return "lead";
+  if (id.includes("sales")) return "trend";
   if (id.includes("productivity")) return "chart";
   if (id.includes("activity")) return "clock";
   return "folder";
@@ -1567,6 +1567,15 @@ function NavGlyph({ name }) {
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d="M4.5 8.5 12 4.5l7.5 4v11L12 19.5l-7.5-4v-11Z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
         <path d="M12 4.5v15M4.5 8.5 12 12.5l7.5-4" fill="none" stroke="currentColor" strokeWidth="1.8" />
+      </svg>
+    );
+  }
+  if (name === "lead") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="9" cy="8" r="3" fill="none" stroke="currentColor" strokeWidth="1.8" />
+        <path d="M3.8 19c.7-3.1 2.4-4.6 5.2-4.6s4.5 1.5 5.2 4.6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+        <path d="M16.5 8.5h4M16.5 12h4M16.5 15.5h2.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
       </svg>
     );
   }

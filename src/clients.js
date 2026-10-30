@@ -1,4 +1,5 @@
 import { loadUsers } from "./crm.js";
+import { claimClientCode, noteClientCode } from "./registry.js";
 import { readAccount, readScoped, writeScoped } from "./scope.js";
 
 const STORAGE_KEY = "neon-crm-clients";
@@ -27,6 +28,7 @@ export function loadClients() {
 }
 
 export function saveClients(clients) {
+  (clients || []).forEach((client) => noteClientCode(client?.code));
   writeScoped(STORAGE_KEY, clients);
 }
 
@@ -58,12 +60,12 @@ export function formatClientCode(number) {
 }
 
 export function nextClientCode(clients) {
-  let max = 0;
-  for (const client of clients) max = Math.max(max, clientCodeNumber(client.code));
-  return formatClientCode(max + 1);
+  (clients || []).forEach((client) => noteClientCode(client?.code));
+  return claimClientCode();
 }
 
 export function withClientCodes(clients) {
+  (clients || []).forEach((client) => noteClientCode(client?.code));
   const used = new Set();
   let max = 0;
   const assigned = new Map();
@@ -82,10 +84,8 @@ export function withClientCodes(clients) {
     }
     if (number && client.code === formatClientCode(number)) continue;
     if (client.code && !number) continue;
-    max += 1;
-    while (used.has(max)) max += 1;
-    used.add(max);
-    assigned.set(client.id, formatClientCode(max));
+    const code = claimClientCode();
+    assigned.set(client.id, code);
     changed = true;
   }
   if (!changed) return { clients, changed: false };

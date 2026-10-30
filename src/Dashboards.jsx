@@ -9,12 +9,11 @@ import {
 } from "./finance.js";
 import { loadHrms } from "./hrms.js";
 import { loadMarketing } from "./marketing.js";
-import { loadIssues } from "./issues.js";
+import { ISSUE_PRIORITIES, loadIssues } from "./issues.js";
 import { loadClients } from "./clients.js";
 import { companyProjects, loadProjects, marketingProjects, projectCounts, taskDepartment } from "./projects.js";
 import { loadReports } from "./reports.js";
 import {
-  companyConvertedQuotes,
   formatMoney,
   loadCeoSales,
   loadPackages,
@@ -24,7 +23,7 @@ import {
   todayISO,
 } from "./sales.js";
 import { dataOwner, readAccount, sessionAccount } from "./scope.js";
-import { loadTasks, tasksForOwner } from "./tasks.js";
+import { BOARD_COLUMNS, loadTasks, tasksForOwner } from "./tasks.js";
 import { InvoiceDialog } from "./InvoiceView.jsx";
 
 const PALETTE = ["#873CFF", "#1A2042", "#C412FC", "#68A8FF", "#F103FA", "#131937", "#070C2B", "#68A8FF"];
@@ -67,8 +66,8 @@ export function CeoDashboard() {
       />
       <section className="dash-metrics">
         <Metric tone={3} label={picture.revenueLabel} value={formatMoney(picture.monthRevenue)} />
-        <Metric tone={0} label="Projects" value={String(picture.convertedProjects)} />
-        <Metric tone={1} label="Own projects" value={String(picture.ownProjects.length)} />
+        <Metric tone={0} label="Projects" value={String(picture.projectCount)} />
+        <Metric tone={1} label="Own projects" value={String(picture.ownProjectCount)} />
         <Metric tone={2} label="People" value={String(picture.employees.length)} />
         <Metric tone={4} label="Packages" value={String(picture.packages.length)} />
       </section>
@@ -99,16 +98,16 @@ export function CeoDashboard() {
         )}
       </article>
       <div className="chart-grid three">
-        <RingCard title="Project status" slices={picture.projectSlices} />
-        <RingCard title="Sales follow-ups" slices={picture.followSlices} />
-        <RingCard title="People by department" slices={picture.departmentSlices} />
+        <RingCard title="Project status" slices={picture.projectSlices} showDetail={false} />
+        <RingCard title="Sales follow-ups" slices={picture.followSlices} showDetail={false} />
+        <RingCard title="People by department" slices={picture.departmentSlices} showDetail={false} />
       </div>
       <div className="chart-grid">
-        <BarCard title="Finance records" tone="slate" slices={picture.financeSlices} />
-        <BarCard title="Expenses" tone="slate" slices={picture.expenseSlices} format={formatMoney} />
-        <BarCard title="Marketing" tone="slate" slices={picture.marketingSlices} />
-        <BarCard title="Packages" tone="slate" slices={picture.packageSlices} />
-        <BarCard title="User accounts" tone="slate" slices={picture.userSlices} />
+        <BarCard title="Finance records" tone="slate" slices={picture.financeSlices} showDetail={false} />
+        <BarCard title="Expenses" tone="slate" slices={picture.expenseSlices} format={formatMoney} showDetail={false} />
+        <BarCard title="Marketing" tone="slate" slices={picture.marketingSlices} showDetail={false} />
+        <BarCard title="Packages" tone="slate" slices={picture.packageSlices} showDetail={false} />
+        <BarCard title="User accounts" tone="slate" slices={picture.userSlices} showDetail={false} />
       </div>
       <InvoiceBoard title="Approved payment invoices" invoices={approved} onView={setViewing} empty="Approved invoices appear here after you stamp them." />
       <InvoiceDialog invoice={viewing} onClose={() => setViewing(null)} />
@@ -137,14 +136,14 @@ function OwnProjectsBoard() {
         <Metric tone={4} label="Payments" value={String(picture.payments.length)} />
       </section>
       <div className="chart-grid">
-        <RingCard title="Project status" slices={picture.projectSlices} />
-        <BarCard title="Project type" tone="slate" slices={picture.typeSlices} />
+        <RingCard title="Project status" slices={picture.projectSlices} showDetail={false} />
+        <BarCard title="Project type" tone="slate" slices={picture.typeSlices} showDetail={false} />
       </div>
       <div className="chart-grid">
-        <BarCard title="Clients" tone="slate" slices={picture.clientSlices} />
-        <BarCard title="Marketing" tone="slate" slices={picture.marketingSlices} />
-        <BarCard title="Payments" tone="slate" slices={picture.paymentSlices} />
-        <BarCard title="Quotations" tone="slate" slices={picture.quoteSlices} format={formatMoney} />
+        <BarCard title="Clients" tone="slate" slices={picture.clientSlices} showDetail={false} />
+        <BarCard title="Marketing" tone="slate" slices={picture.marketingSlices} showDetail={false} />
+        <BarCard title="Payments" tone="slate" slices={picture.paymentSlices} showDetail={false} />
+        <BarCard title="Quotations" tone="slate" slices={picture.quoteSlices} format={formatMoney} showDetail={false} />
       </div>
       <article className="panel dash-panel">
         <h2>Projects</h2>
@@ -204,17 +203,12 @@ export function MdDashboard() {
   const username = sessionAccount()?.username || "";
   const data = loadMarketing();
   const side = marketingSideCounts();
-  const industry = counted(
-    uniqueLabels(data.clients.map((item) => item.industry || "Unspecified")),
-    data.clients,
-    (item) => item.industry || "Unspecified",
-    (item) => item.brandName || item.legalName || "Info document"
-  );
   const work = [
     namedSlice("docs", "Info documents", data.clients.length, "#873CFF", []),
     namedSlice("plans", "Content plans", data.plans.length, "#68A8FF", []),
     namedSlice("reports", "Reports", data.reports.length, "#C412FC", []),
   ];
+  const projects = statusSlices(marketingProjects({ includeArchived: true }));
   return (
     <div className="stack">
       <Hero kicker={username} title="Marketing dashboard" note="" badge={`${data.reports.length} reports`} tone="md" />
@@ -227,7 +221,7 @@ export function MdDashboard() {
         <Metric tone={5} label="Issues" value={String(side.issues)} />
       </section>
       <div className="chart-grid md-dash-charts">
-        <RingCard title="Industries" showDetail={false} slices={industry.length ? industry : [namedSlice("none", "No documents", 0, "#8e99a4", [])]} />
+        <RingCard title="Projects" showDetail={false} slices={projects} />
         <BarCard title="Marketing work" tone="slate" slices={work} showDetail={false} />
       </div>
     </div>
@@ -452,9 +446,8 @@ function ceoPicture() {
   const finance = loadFinance();
   const packages = loadPackages();
   const employees = loadHrms().employees;
-  const pmProjects = readAll("pm", "neon-crm-projects", "projects");
-  const ownProjects = readOwn(username, "neon-crm-projects", "projects");
-  const convertedProjects = companyConvertedQuotes().length;
+  const pmProjects = activeProjects(readAll("pm", "neon-crm-projects", "projects"));
+  const ownProjects = activeProjects(readOwn(username, "neon-crm-projects", "projects"));
   const follows = readAll("sales", "neon-crm-sales", "followUps");
   const marketingDocs = accounts("marketing").map((user) => ({
     id: user.username,
@@ -476,8 +469,9 @@ function ceoPicture() {
     employees,
     pmProjects,
     ownProjects,
-    convertedProjects,
-    projectSlices: statusSlices(pmProjects),
+    projectCount: pmProjects.length + ownProjects.length,
+    ownProjectCount: ownProjects.length,
+    projectSlices: statusSlices([...pmProjects, ...ownProjects]),
     ownSlices: statusSlices(ownProjects),
     departmentSlices: peopleByDepartment(employees),
     financeSlices: [
@@ -495,7 +489,7 @@ function ceoPicture() {
 }
 
 function ownPicture(username) {
-  const projects = readOwn(username, "neon-crm-projects", "projects");
+  const projects = activeProjects(readOwn(username, "neon-crm-projects", "projects"));
   const clients = readOwn(username, "neon-crm-clients", "clients");
   const marketing = readAccount("neon-crm-marketing", username) || {};
   const docs = Array.isArray(marketing.clients) ? marketing.clients : [];
@@ -559,7 +553,7 @@ function pmPicture() {
     clients,
     projectSlices: statusSlices(projects),
     taskSlices: counted(["critical", "high", "medium", "low"], tasks, (item) => item.priority || "medium", (item) => item.title || "Task"),
-    issueSlices: counted(["open", "in-progress", "resolved", "closed"], issues, (item) => item.status || "open", (item) => item.title || "Issue"),
+    issueSlices: catalogSlices(ISSUE_PRIORITIES, issues, (item) => item.priority || "medium", (item) => item.title || "Issue", (id) => ISSUE_PRIORITY_COLOR[id]),
     clientSlices: counted(["active", "inactive"], clients, (item) => item.status || "active", (item) => item.name || "Client"),
     reportSlices: [
       namedSlice("srs", "SRS documents", reports.srs.length, "#873CFF", reports.srs.map((item) => item.title || "SRS")),
@@ -569,6 +563,10 @@ function pmPicture() {
     packageSlices: packageSlices(loadPackages()),
     teamSlices: peopleByDepartment(loadHrms().employees),
   };
+}
+
+function activeProjects(projects) {
+  return (projects || []).filter((project) => !project.archived);
 }
 
 function statusSlices(projects) {
@@ -606,6 +604,26 @@ function moneySlices(rows) {
   }));
 }
 
+const ISSUE_PRIORITY_COLOR = {
+  critical: "#e11d48",
+  high: "#f59e0b",
+  medium: "#873CFF",
+  low: "#17803d",
+};
+
+function catalogSlices(pairs, items, idOf, nameOf, colorOf = () => "") {
+  return pairs.map(([id, label], index) => {
+    const matched = items.filter((item) => idOf(item) === id);
+    return {
+      id,
+      label,
+      value: matched.length,
+      names: matched.map(nameOf).filter(Boolean),
+      color: colorOf(id) || PALETTE[index % PALETTE.length],
+    };
+  });
+}
+
 function counted(catalog, items, idOf, nameOf) {
   return catalog.map((id, index) => {
     const label = labelize(id);
@@ -622,10 +640,6 @@ function counted(catalog, items, idOf, nameOf) {
 
 function namedSlice(id, label, value, color, names) {
   return { id, label, value, color, names: names.filter(Boolean) };
-}
-
-function uniqueLabels(values) {
-  return [...new Set(values.filter(Boolean))];
 }
 
 function marketingSideCounts() {

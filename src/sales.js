@@ -1,5 +1,6 @@
 import neonLogo from "./assets/neonlabz-logo.png";
-import { blankClient, clientCodeNumber, formatClientCode, loadClients, nextClientCode, saveClients } from "./clients.js";
+import { blankClient, loadClients, nextClientCode, saveClients } from "./clients.js";
+import { claimClientCode, claimLeadId as reserveLeadId, forgetLeadPhone, leadIdTaken, leadPhoneHolder, noteClientCode, noteLeadId, rememberLeadPhone, suggestLeadId, syncLeadPhones } from "./registry.js";
 import { formatScopeHtml, sanitizeScopeHtml, scopeHasText } from "./richText.js";
 import { loadUsers } from "./crm.js";
 import { invoiceDocumentFromPayment, invoiceDocumentFromQuote } from "./brandDocument.js";
@@ -270,10 +271,7 @@ export function loadSales() {
       publishIncoming(stored);
       return withPackages(stored);
     }
-    const seeded = blankSales();
-    const session = sessionAccount();
-    if (owner && session?.role !== "ceo" && session?.username === owner) persistSales(seeded);
-    return withPackages(seeded);
+    return withPackages(blankSales());
   } catch {
     return withPackages(blankSales());
   }
@@ -739,9 +737,12 @@ function directoryLeads() {
 function publishLeadDirectory() {
   const harvested = harvestLeadIndex();
   const stored = loadLeadIndex();
+  const ids = { ...stored.ids, ...harvested.ids };
+  Object.keys(ids).forEach((id) => noteLeadId(id));
+  syncLeadPhones(harvested.phones);
   saveLeadIndex({
     sequence: Math.max(harvested.sequence, stored.sequence),
-    ids: { ...stored.ids, ...harvested.ids },
+    ids,
     leads: directoryLeads(),
   });
 }
@@ -786,41 +787,32 @@ function saveLeadIndex(index) {
 function claimLeadId(preferred) {
   const harvested = harvestLeadIndex();
   const stored = loadLeadIndex();
-  const ids = { ...stored.ids, ...harvested.ids };
-  let sequence = Math.max(Number(stored.sequence) || 0, harvested.sequence);
+  Object.keys({ ...stored.ids, ...harvested.ids }).forEach((id) => noteLeadId(id));
+  syncLeadPhones(harvested.phones);
   const wanted = String(preferred || "").trim();
-  let id = wanted && !harvested.ids[wanted] ? wanted : "";
-  if (!id) {
-    do {
-      sequence += 1;
-      id = formatLeadId(sequence);
-    } while (ids[id]);
-  } else {
-    sequence = Math.max(sequence, leadIdNumber(id));
-  }
-  ids[id] = true;
-  saveLeadIndex({ sequence, ids });
+  const free = wanted && !harvested.ids[wanted] && !stored.ids[wanted] && !leadIdTaken(wanted);
+  const id = reserveLeadId(free ? wanted : "");
+  saveLeadIndex({
+    sequence: Math.max(harvested.sequence, stored.sequence, leadIdNumber(id)),
+    ids: { ...stored.ids, ...harvested.ids, [id]: true },
+  });
   return id;
 }
 
 export function nextLeadId() {
   const harvested = harvestLeadIndex();
   const stored = loadLeadIndex();
-  const ids = { ...stored.ids, ...harvested.ids };
-  let sequence = Math.max(Number(stored.sequence) || 0, harvested.sequence);
-  let id;
-  do {
-    sequence += 1;
-    id = formatLeadId(sequence);
-  } while (ids[id]);
-  return id;
+  Object.keys({ ...stored.ids, ...harvested.ids }).forEach((id) => noteLeadId(id));
+  syncLeadPhones(harvested.phones);
+  return suggestLeadId();
 }
 
 export function leadPhoneTaken(phone, exceptId = "") {
   const digits = phoneDigits(phone);
   if (digits.length !== 10) return false;
-  const holder = harvestLeadIndex().phones[digits];
-  return Boolean(holder && holder !== exceptId);
+  const local = harvestLeadIndex().phones[digits];
+  const shared = leadPhoneHolder(phone);
+  return [local, shared].some((holder) => holder && holder !== exceptId);
 }
 
 export function dueLeads(leads, day = todayISO()) {
@@ -985,9 +977,9 @@ export function saveCollectionTarget(data, month, amount) {
   };
 }
 
-export function confirmedCollections(data, month) {
+export function confirmedCollections(data, month, range) {
   return (data.payments || [])
-    .filter((payment) => payment.status === "confirmed" && payment.approval !== "pending" && monthKey(payment.date) === month)
+    .filter((payment) => payment.status === "confirmed" && payment.approval !== "pending" && inReportingPeriod(payment.date, month, range))
     .reduce((sum, payment) => sum + payment.amount, 0);
 }
 
@@ -1281,27 +1273,22 @@ export function convertedPaymentClients(data) {
 }
 
 function nextSalesClientCode(data) {
-  let max = 0;
-  (data?.leads || []).forEach((lead) => {
-    max = Math.max(max, clientCodeNumber(lead.clientCode));
+  (data?.leads || []).forEach((lead) => noteClientCode(lead.clientCode));
+  (data?.quotes || []).forEach((quote) => noteClientCode(quote.clientCode));
+  eachSalesAccount((raw) => {
+    (raw?.leads || []).forEach((lead) => noteClientCode(lead?.clientCode));
+    (raw?.quotes || []).forEach((quote) => noteClientCode(quote?.clientCode));
   });
-  (data?.quotes || []).forEach((quote) => {
-    max = Math.max(max, clientCodeNumber(quote.clientCode));
-  });
-  return formatClientCode(max + 1);
+  return claimClientCode();
 }
 
 export function assignConvertedClientCodes(data) {
-  let max = 0;
-  (data?.leads || []).forEach((lead) => {
-    max = Math.max(max, clientCodeNumber(lead.clientCode));
-  });
   let changed = false;
   const leads = (data?.leads || []).map((lead) => {
+    if (lead.clientCode) noteClientCode(lead.clientCode);
     if (lead.status !== "Converted" || lead.clientCode) return lead;
-    max += 1;
     changed = true;
-    return { ...lead, clientCode: formatClientCode(max) };
+    return { ...lead, clientCode: claimClientCode() };
   });
   return changed ? { ...data, leads } : data;
 }
@@ -1350,6 +1337,12 @@ export function memberConfig(data, username) {
 
 export function monthKey(date) {
   return String(date || "").slice(0, 7);
+}
+
+export function inReportingPeriod(date, month, range) {
+  const value = String(date || "").slice(0, 10);
+  if (range?.from && range?.to) return value >= range.from && value <= range.to;
+  return monthKey(value) === month;
 }
 
 export function confirmedRevenue(data, username, month) {
@@ -1831,7 +1824,8 @@ export function saveLead(data, draft) {
   if (digits.length && digits.length !== 10) {
     return { ok: false, error: "Enter a 10-digit phone number." };
   }
-  if (digits.length === 10 && leadPhoneTaken(phone, existing?.id || "")) {
+  const samePhone = existing && phoneDigits(existing.phone) === digits;
+  if (digits.length === 10 && !samePhone && leadPhoneTaken(phone, existing?.id || "")) {
     return { ok: false, error: LEAD_PHONE_EXISTS_MESSAGE };
   }
   const email = String(draft.email || "").trim();
@@ -1885,6 +1879,11 @@ export function saveLead(data, draft) {
     next.next = lastCall.next || next.next;
   }
   if (next.status === "Converted" && !next.clientCode) next.clientCode = nextSalesClientCode(data);
+  if (next.clientCode) noteClientCode(next.clientCode);
+  const phoneAccepted = rememberLeadPhone(next.id, next.phone);
+  if (digits.length === 10 && !samePhone && !phoneAccepted) {
+    return { ok: false, error: LEAD_PHONE_EXISTS_MESSAGE };
+  }
   const currentLeads = Array.isArray(data.leads) ? data.leads : [];
   const leads = existing
     ? currentLeads.map((item) => (item.id === existing.id ? next : item))
@@ -1907,6 +1906,7 @@ export function deleteLead(data, id) {
   const payments = (data.payments || []).filter((payment) => payment.clientId === id);
   if (quotes.length) return { ok: false, error: "This lead already has a quotation. Remove the quotation first." };
   if (payments.length) return { ok: false, error: "This lead already has a payment. Cancel the payment first." };
+  forgetLeadPhone(id);
   const saved = {
     ...data,
     leads: (data.leads || []).filter((item) => item.id !== id),

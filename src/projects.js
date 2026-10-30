@@ -1,5 +1,6 @@
 import { loadUsers } from "./crm.js";
 import { loadIncomingProjects, projectTypeFromQuote, quoteForClientRecord, salesClientByName } from "./sales.js";
+import { claimProjectCode, noteProjectCode, projectIdTaken, suggestProjectCode } from "./registry.js";
 import { readAccount, readScoped, sessionAccount, writeScoped } from "./scope.js";
 import { crmStorage } from "./storage.js";
 
@@ -26,6 +27,7 @@ export function loadProjects() {
 }
 
 export function saveProjects(data) {
+  (data?.projects || []).forEach((project) => noteProjectCode(project?.code));
   writeScoped(STORAGE_KEY, data);
 }
 
@@ -136,26 +138,35 @@ export function companyProjectCodes(exceptMarketingId = "") {
 }
 
 export function nextCompanyProjectCode(extraCodes = []) {
-  return nextProjectCode([], [...companyProjectCodes(), ...extraCodes]);
+  [...companyProjectCodes(), ...extraCodes].forEach((code) => noteProjectCode(code));
+  return claimProjectCode();
+}
+
+export function suggestCompanyProjectCode(extraCodes = []) {
+  [...companyProjectCodes(), ...extraCodes].forEach((code) => noteProjectCode(code));
+  return suggestProjectCode();
 }
 
 export function projectCodeTaken(code, { exceptMarketingId = "", clientName = "" } = {}) {
   const want = (canonicalProjectCode(code) || String(code || "").trim()).toLowerCase();
   if (!want) return false;
+  let found = false;
   for (const item of companyProjectCodes(exceptMarketingId)) {
     const value = (canonicalProjectCode(item) || String(item || "").trim()).toLowerCase();
-    if (value === want) {
-      const project = allProjectRecords().find((row) => (canonicalProjectCode(row.code) || "").toLowerCase() === want);
-      if (!project) return true;
-      const sameClient = clientName && project.client.toLowerCase() === String(clientName).trim().toLowerCase();
-      const marketingType = project.type === "marketing" || project.type === "both";
-      if (!(sameClient && marketingType)) return true;
-    }
+    if (value !== want) continue;
+    found = true;
+    const project = allProjectRecords().find((row) => (canonicalProjectCode(row.code) || "").toLowerCase() === want);
+    if (!project) return true;
+    const sameClient = clientName && project.client.toLowerCase() === String(clientName).trim().toLowerCase();
+    const marketingType = project.type === "marketing" || project.type === "both";
+    if (!(sameClient && marketingType)) return true;
   }
-  return false;
+  if (found) return false;
+  return projectIdTaken(code);
 }
 
 export function withProjectCodes(projects, extraCodes = []) {
+  [...extraCodes, ...(projects || []).map((project) => project?.code)].forEach((code) => noteProjectCode(code));
   const reserved = new Set();
   for (const code of extraCodes) {
     const number = projectCodeNumber(code);
@@ -179,11 +190,8 @@ export function withProjectCodes(projects, extraCodes = []) {
     }
     if (canonical && project.code === canonical) continue;
     if (project.code && !number) continue;
-    max = Math.max(max, ...used, ...reserved, 0);
-    max += 1;
-    while (used.has(max) || reserved.has(max)) max += 1;
-    used.add(max);
-    assigned.set(project.id, formatProjectCode(max));
+    const code = claimProjectCode();
+    assigned.set(project.id, code);
     changed = true;
   }
   if (!changed) return { projects, changed: false };
@@ -249,6 +257,7 @@ export function canManageDepartment(role, project, department) {
 
 export function canEditProjectShell(role, project) {
   const type = projectTypeOf(project);
+  if (role === "ceo") return true;
   if (role === "pm") return type !== "marketing";
   if (role === "marketing") return type === "marketing";
   return false;
@@ -280,14 +289,15 @@ function asMarketingProject(project, owner) {
   };
 }
 
-export function marketingProjects() {
+export function marketingProjects({ includeArchived = false } = {}) {
   const rows = [];
   loadUsers()
     .filter((user) => user.active && (user.role === "pm" || user.role === "marketing"))
     .forEach((user) => {
       accountProjectStore(user.username).raw.projects.forEach((project) => {
         const name = String(project?.name || "").trim();
-        if (!project?.id || !name || project.archived) return;
+        if (!project?.id || !name) return;
+        if (!includeArchived && project.archived) return;
         if (project.type !== "marketing" && project.type !== "both") return;
         rows.push(asMarketingProject(project, user.username));
       });
@@ -363,6 +373,7 @@ export function upsertMarketingProjectFromDoc(doc, owner = sessionAccount()?.use
     marketingId: doc.id,
     origin: current?.origin || "marketing",
   };
+  noteProjectCode(next.code);
   store.raw.projects = current
     ? store.raw.projects.map((item) => (item.id === current.id ? next : item))
     : [next, ...store.raw.projects];
@@ -485,7 +496,7 @@ export function projectsForEmployee(code) {
   const employee = String(code || "").trim().toUpperCase();
   if (!/^EMP\d{3}$/.test(employee)) return [];
   return loadUsers()
-    .filter((user) => user.active && (user.role === "pm" || user.role === "marketing"))
+    .filter((user) => user.active && (user.role === "pm" || user.role === "marketing" || user.role === "ceo"))
     .flatMap((user) => {
       const stored = readAccount(STORAGE_KEY, user.username);
       const projects = Array.isArray(stored?.projects) ? stored.projects : [];

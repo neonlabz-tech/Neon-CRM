@@ -38,6 +38,7 @@ export async function api(path, { method = "GET", body } = {}) {
   if (!res.ok) {
     const error = new Error(data.error || "Request failed.");
     error.status = res.status;
+    error.rejected = Array.isArray(data.rejected) ? data.rejected : [];
     throw error;
   }
   return data;

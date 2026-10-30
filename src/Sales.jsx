@@ -32,6 +32,7 @@ import {
   assignConvertedClientCodes,
   collectionTarget,
   confirmedCollections,
+  inReportingPeriod,
   convertedClients,
   convertedPaymentClients,
   dueLeads,
@@ -51,7 +52,6 @@ import {
   loadCeoSales,
   loadSales,
   releaseSalesPaymentsForApproval,
-  monthKey,
   importLeadsFromCsv,
   nextLeadId,
   nextQuoteNumber,
@@ -69,10 +69,8 @@ import {
   projectTypeFromQuote,
   salesStaffName,
   saveClientQuote,
-  saveCollectionTarget,
   saveCeoSales,
   saveLead,
-  saveSalesSettings,
   sortLeadsById,
   savePackage,
   saveSales,
@@ -104,7 +102,13 @@ export function SalesWorkspace({ access, username, section, paymentsSource, pers
   const canEdit = access === "full";
   const tabs = salesTabs(canEdit);
   const [tab, setTab] = useState("overview");
-  const [month, setMonth] = useState(() => todayISO().slice(0, 7));
+  const [month, setMonthValue] = useState(() => todayISO().slice(0, 7));
+  const [range, setRange] = useState({ from: "", to: "" });
+
+  function setMonth(next) {
+    setMonthValue(next || todayISO().slice(0, 7));
+    setRange({ from: "", to: "" });
+  }
   const [data, setData] = useState(() => {
     releaseSalesPaymentsForApproval();
     const loaded = loadSales();
@@ -118,6 +122,9 @@ export function SalesWorkspace({ access, username, section, paymentsSource, pers
     }
     return next;
   });
+  useEffect(() => {
+    releaseSalesPaymentsForApproval();
+  }, [data.payments]);
   const executives = useMemo(() => {
     if (personal && username) {
       const self = loadUsers().find((user) => user.username === username);
@@ -152,48 +159,190 @@ export function SalesWorkspace({ access, username, section, paymentsSource, pers
               </button>
             ))}
           </div>
-          {showMonth ? <MonthField month={month} setMonth={setMonth} /> : null}
+          {showMonth ? <MonthField month={month} setMonth={setMonth} range={range} setRange={setRange} /> : null}
         </div>
       )}
       {section && showMonth && active !== "overview" ? (
         <div className="toolbar month-toolbar">
-          <MonthField month={month} setMonth={setMonth} />
+          <MonthField month={month} setMonth={setMonth} range={range} setRange={setRange} />
         </div>
       ) : null}
       {active === "overview" ? (
         <OverviewPanel
           data={data}
           month={month}
+          range={range}
           setMonth={section ? setMonth : undefined}
+          setRange={section ? setRange : undefined}
           executives={executives}
           canEdit={canEdit}
           commit={commit}
         />
       ) : null}
       {active === "sample" ? <SalesQuotationsPanel data={data} commit={commit} canEdit={canEdit} /> : null}
-      {active === "payments" ? <PaymentsPanel data={data} commit={commit} canEdit={canEdit} month={month} source={paymentsSource} /> : null}
+      {active === "payments" ? <PaymentsPanel data={data} commit={commit} canEdit={canEdit} month={month} range={range} source={paymentsSource} /> : null}
       {active === "follow" ? <FollowUpPanel data={data} commit={commit} canEdit={canEdit} executives={executives} username={username} month={month} allowDelete={personal} /> : null}
       {active === "packages" ? <PackagesPanel data={data} commit={commit} canEdit={canEdit} /> : null}
     </div>
   );
 }
 
-function MonthField({ month, setMonth }) {
+function MonthField({ month, setMonth, range, setRange }) {
+  const root = useRef(null);
+  const [open, setOpen] = useState(false);
+  const [view, setView] = useState("months");
+  const [year, setYear] = useState(() => Number(String(month).slice(0, 4)) || new Date().getFullYear());
+  const [draftFrom, setDraftFrom] = useState("");
+  const [draftTo, setDraftTo] = useState("");
+
+  useEffect(() => {
+    if (!open) return undefined;
+    function onPointer(event) {
+      if (!root.current?.contains(event.target)) setOpen(false);
+    }
+    function onKey(event) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("pointerdown", onPointer);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onPointer);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  function toggle() {
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    setYear(Number(String(month).slice(0, 4)) || new Date().getFullYear());
+    setView("months");
+    setOpen(true);
+  }
+
+  function pickMonth(value) {
+    if (value === month) {
+      const same = range?.from?.startsWith(value) && range?.to?.startsWith(value);
+      setDraftFrom(same ? range.from : "");
+      setDraftTo(same ? range.to : "");
+      setView("days");
+      return;
+    }
+    setMonth(value);
+  }
+
+  function pickDay(iso) {
+    if (!draftFrom || draftTo) {
+      setDraftFrom(iso);
+      setDraftTo("");
+      return;
+    }
+    if (iso < draftFrom) {
+      setDraftTo(draftFrom);
+      setDraftFrom(iso);
+      return;
+    }
+    setDraftTo(iso);
+  }
+
+  function applyDates() {
+    if (!draftFrom) return;
+    setRange({ from: draftFrom, to: draftTo || draftFrom });
+    setOpen(false);
+  }
+
+  function useWholeMonth() {
+    setRange({ from: "", to: "" });
+    setDraftFrom("");
+    setDraftTo("");
+    setOpen(false);
+  }
+
+  const days = monthGrid(month);
+  const shown = reportingLabel(month, range);
+
   return (
-    <label>
-      Reporting month
-      <input type="month" value={month} onChange={(event) => setMonth(event.target.value || todayISO().slice(0, 7))} />
-    </label>
+    <div className="report-period" ref={root}>
+      <span>Reporting month</span>
+      <button type="button" className="report-period-trigger" aria-haspopup="dialog" aria-expanded={open} onClick={toggle}>
+        <span>{shown}</span>
+        <CalendarIcon />
+      </button>
+      {open ? (
+        <div className="report-calendar" role="dialog" aria-label="Reporting month">
+          {view === "months" ? (
+            <>
+              <div className="report-calendar-head">
+                <button type="button" className="report-calendar-nav" onClick={() => setYear((value) => value - 1)} aria-label="Previous year">‹</button>
+                <strong>{year}</strong>
+                <button type="button" className="report-calendar-nav" onClick={() => setYear((value) => value + 1)} aria-label="Next year">›</button>
+              </div>
+              <div className="report-months">
+                {MONTH_NAMES.map((name, index) => {
+                  const value = `${year}-${String(index + 1).padStart(2, "0")}`;
+                  return (
+                    <button key={value} type="button" className={value === month ? "selected" : ""} aria-pressed={value === month} onClick={() => pickMonth(value)}>
+                      {name}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="report-calendar-note">Select a month. Click the selected month again to choose dates.</p>
+            </>
+          ) : (
+            <>
+              <div className="report-calendar-head">
+                <button type="button" className="report-calendar-nav" onClick={() => setView("months")} aria-label="Back to months">‹</button>
+                <strong>{monthLabel(month)}</strong>
+                <span />
+              </div>
+              <div className="report-days">
+                {WEEKDAYS.map((name) => <span key={name}>{name}</span>)}
+                {Array.from({ length: days.lead }, (_, index) => <span key={`pad-${index}`} />)}
+                {Array.from({ length: days.count }, (_, index) => {
+                  const iso = `${month}-${String(index + 1).padStart(2, "0")}`;
+                  const selected = iso === draftFrom || (draftTo && iso === draftTo);
+                  const inside = draftFrom && draftTo && iso > draftFrom && iso < draftTo;
+                  return (
+                    <button key={iso} type="button" className={selected ? "selected" : inside ? "in-range" : ""} aria-pressed={selected} onClick={() => pickDay(iso)}>
+                      {index + 1}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="report-calendar-note">
+                {draftFrom ? "Select an end date, then apply. One date filters that day." : "Select dates to filter, or keep the whole month."}
+              </p>
+              <div className="report-calendar-actions">
+                <button type="button" className="ghost" onClick={useWholeMonth}>Whole month</button>
+                <button type="button" className="primary" onClick={applyDates} disabled={!draftFrom}>Apply dates</button>
+              </div>
+            </>
+          )}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
-function OverviewPanel({ data, month, setMonth, executives, canEdit, commit }) {
+function CalendarIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+      <rect x="3.5" y="5" width="17" height="15" rx="2" fill="none" stroke="currentColor" strokeWidth="1.7" />
+      <path d="M3.5 10h17M8 3.5v3M16 3.5v3" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function OverviewPanel({ data, month, range, setMonth, setRange, executives, canEdit, commit }) {
   const target = collectionTarget(data, month, executives.map((user) => user.username));
-  const collected = confirmedCollections(data, month);
+  const collected = confirmedCollections(data, month, range);
   const remaining = Math.max(0, target - collected);
   const percent = target > 0 ? Math.min(100, Math.round((collected / target) * 100)) : 0;
   const commission = collected * (Number(data.rates?.rate) || 0) / 100;
-  const label = monthLabel(month);
+  const label = reportingLabel(month, range);
+  const ranged = Boolean(range?.from && range?.to);
   const today = todayISO();
   const [day, setDay] = useState(() => missionDay());
   const leads = data.leads || [];
@@ -202,59 +351,22 @@ function OverviewPanel({ data, month, setMonth, executives, canEdit, commit }) {
   const callTarget = Number(data.goals?.daily) || 0;
   const leadGoal = Number(data.goals?.leadTarget) || 0;
   const newToday = leads.filter((item) => item.date === day).length;
-  const newMonth = leads.filter((item) => monthKey(item.date) === month).length;
+  const newMonth = leads.filter((item) => inReportingPeriod(item.date, month, range)).length;
   const owner = dataOwner();
   const pending = outstandingBalance(owner);
   const recent = (data.payments || [])
-    .filter((payment) => payment.status !== "cancelled" && monthKey(payment.date) === month)
+    .filter((payment) => payment.status !== "cancelled" && inReportingPeriod(payment.date, month, range))
     .slice(-5)
     .reverse();
-  const [editing, setEditing] = useState("");
-  const [draft, setDraft] = useState({});
-  const [error, setError] = useState("");
   const [leadForm, setLeadForm] = useState(null);
 
   useEffect(() => startMissionClock(setDay), []);
 
-  function openSettings() {
-    setDraft({
-      collection: String(target),
-      callTarget: String(callTarget),
-      leadTarget: String(leadGoal),
-      rate: String(data.rates?.rate ?? 2),
-    });
-    setError("");
-    setEditing("settings");
-  }
-
-  function submitSettings(event) {
-    event.preventDefault();
-    const collection = saveCollectionTarget(data, month, draft.collection);
-    if (!collection.ok) {
-      setError(collection.error);
-      return;
-    }
-    const settings = saveSalesSettings(collection.data, draft);
-    if (!settings.ok) {
-      setError(settings.error);
-      return;
-    }
-    const stored = commit(settings.data);
-    if (stored) {
-      setError(stored);
-      return;
-    }
-    setEditing("");
-  }
-
   return (
     <div className="stack">
-      {canEdit || setMonth ? (
+      {setMonth ? (
         <div className="toolbar sales-head">
-          <div className="icon-actions">
-            {canEdit ? <button className="ghost" type="button" onClick={openSettings}>Targets & commission</button> : null}
-          </div>
-          {setMonth ? <MonthField month={month} setMonth={setMonth} /> : null}
+          <MonthField month={month} setMonth={setMonth} range={range} setRange={setRange} />
         </div>
       ) : null}
       <h2>Sales performance</h2>
@@ -273,8 +385,8 @@ function OverviewPanel({ data, month, setMonth, executives, canEdit, commit }) {
         </div>
       </article>
       <div className="stats four">
-        <Stat label="Monthly sales target" value={formatMoney(target)} note={label} />
-        <Stat label="Confirmed collections" value={formatMoney(collected)} note="Payments received in this month" />
+        <Stat label="Monthly sales target" value={formatMoney(target)} note={monthLabel(month)} />
+        <Stat label="Confirmed collections" value={formatMoney(collected)} note={ranged ? `Payments received ${label}` : "Payments received in this month"} />
         <Stat label="Remaining target" value={formatMoney(remaining)} note="To achieve the monthly target" />
         <Stat label="Earned commission" value={formatMoney(commission)} note={`${data.rates?.rate || 0}% on confirmed collections`} />
       </div>
@@ -299,7 +411,7 @@ function OverviewPanel({ data, month, setMonth, executives, canEdit, commit }) {
         </article>
       </div>
       <div className="stats">
-        <Stat label="New leads this month" value={String(newMonth)} note={label} />
+        <Stat label={ranged ? "New leads" : "New leads this month"} value={String(newMonth)} note={label} />
         <Stat label="Follow-ups due" value={String(due.length)} note="Due today or overdue" />
         <Stat label="Pending collections" value={formatMoney(pending)} note="Remaining on promised quotations" />
       </div>
@@ -325,7 +437,7 @@ function OverviewPanel({ data, month, setMonth, executives, canEdit, commit }) {
         </article>
         <article className="panel">
           <h2>Recent sales</h2>
-          {recent.length === 0 ? <p className="empty-copy">No sales this month.</p> : (
+          {recent.length === 0 ? <p className="empty-copy">{ranged ? `No sales in ${label}.` : "No sales this month."}</p> : (
             <table>
               <thead>
                 <tr><th>Client</th><th>Type</th><th>Collected</th><th>Date</th></tr>
@@ -344,34 +456,6 @@ function OverviewPanel({ data, month, setMonth, executives, canEdit, commit }) {
           )}
         </article>
       </div>
-      {editing === "settings" ? (
-        <SalesModal onClose={() => setEditing("")}>
-          <form className="modal" onSubmit={submitSettings}>
-            <h2>Targets & commission</h2>
-            <label>
-              Monthly sales target (LKR)
-              <input type="number" min="0" step="0.01" value={draft.collection} onChange={(event) => setDraft({ ...draft, collection: event.target.value })} required />
-            </label>
-            <label>
-              Daily answered call target
-              <input type="number" min="0" step="1" value={draft.callTarget} onChange={(event) => setDraft({ ...draft, callTarget: event.target.value })} required />
-            </label>
-            <label>
-              Daily new lead target
-              <input type="number" min="0" step="1" value={draft.leadTarget} onChange={(event) => setDraft({ ...draft, leadTarget: event.target.value })} required />
-            </label>
-            <label>
-              Commission rate (%)
-              <input type="number" min="0" step="0.01" value={draft.rate} onChange={(event) => setDraft({ ...draft, rate: event.target.value })} required />
-            </label>
-            {error ? <p className="form-error">{error}</p> : null}
-            <div className="modal-actions">
-              <button className="primary" type="submit">Save</button>
-              <button className="ghost" type="button" onClick={() => setEditing("")}>Cancel</button>
-            </div>
-          </form>
-        </SalesModal>
-      ) : null}
       {leadForm ? (
         <LeadDialog
           lead={leadForm}
@@ -1309,13 +1393,13 @@ function QuotePaper({ quote, heading = "QUOTATION" }) {
   );
 }
 
-function PaymentsPanel({ data, commit, canEdit, month, source }) {
+function PaymentsPanel({ data, commit, canEdit, month, range, source }) {
   const ownPayments = source === "own";
   const [draft, setDraft] = useState(() => blankPayment());
   const [error, setError] = useState("");
   const [invoiceView, setInvoiceView] = useState(null);
   const [clientQuery, setClientQuery] = useState("");
-  const visible = data.payments.filter((payment) => monthKey(payment.date) === month);
+  const visible = data.payments.filter((payment) => inReportingPeriod(payment.date, month, range));
   const owner = dataOwner();
   const clients = ownPayments
     ? loadClients()
@@ -1545,7 +1629,7 @@ function PaymentsPanel({ data, commit, canEdit, month, source }) {
           </div>
         </div>
         {visible.length === 0 ? (
-          <p className="empty-copy">No payments in {month}.</p>
+          <p className="empty-copy">No payments in {reportingLabel(month, range)}.</p>
         ) : listed.length === 0 ? (
           <p className="empty-copy">No payments match that client.</p>
         ) : (
@@ -2826,11 +2910,35 @@ function dateInMonth(month) {
   return today.slice(0, 7) === month ? today : `${month}-01`;
 }
 
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const WEEKDAYS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
+
+function monthGrid(month) {
+  const [year, mon] = String(month || "").split("-").map(Number);
+  if (!year || !mon) return { lead: 0, count: 0 };
+  const count = new Date(year, mon, 0).getDate();
+  const lead = (new Date(year, mon - 1, 1).getDay() + 6) % 7;
+  return { lead, count };
+}
+
 function monthLabel(month) {
   const [year, mon] = String(month || "").split("-");
   const date = new Date(Date.UTC(Number(year), Number(mon) - 1, 1));
   if (Number.isNaN(date.getTime())) return month;
   return new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric", timeZone: "UTC" }).format(date);
+}
+
+function reportingLabel(month, range) {
+  if (!(range?.from && range?.to) || !String(range.from).startsWith(month)) return monthLabel(month);
+  if (range.from === range.to) return shortDay(range.from);
+  return `${Number(range.from.slice(8))}–${shortDay(range.to)}`;
+}
+
+function shortDay(iso) {
+  const [year, mon, day] = String(iso || "").split("-").map(Number);
+  const date = new Date(Date.UTC(year, mon - 1, day));
+  if (Number.isNaN(date.getTime())) return iso;
+  return new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" }).format(date);
 }
 
 function blankPackage() {

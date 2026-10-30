@@ -7,10 +7,20 @@ import helmet from "helmet";
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import crypto from "crypto";
 import path from "path";
 import { fileURLToPath } from "url";
 import { Audit, Store, User } from "./models.js";
 import { COMPANY, canReadStore, canWriteStore, isCeo, roleFromUsername } from "./access.js";
+import {
+  REGISTRY_KEY,
+  RegistryError,
+  claimRegistryCode,
+  leadPhoneOwner,
+  releaseLeadPhone,
+  reserveLeadPhone,
+  unionRegistryIds,
+} from "./registryStore.js";
 import {
   RESET_MESSAGE,
   ceoRecoveryEmail,
@@ -100,6 +110,48 @@ async function writeAudit(actor, action, detail = {}) {
   } catch (error) {
     console.error("Could not write audit log.", error.message);
   }
+}
+
+function employeeCodeOnProject(project, code) {
+  const named = [...(project?.assignees || []), ...(project?.marketingAssignees || [])]
+    .some((value) => String(value || "").trim().toUpperCase() === code);
+  if (named) return true;
+  return (project?.milestones || []).some((item) =>
+    (item?.assignees || []).some((value) => String(value || "").trim().toUpperCase() === code)
+  );
+}
+
+function employeeAssignedStores(stores, username) {
+  const code = String(username || "").trim().toUpperCase();
+  if (!/^EMP\d{3}$/.test(code)) return [];
+  const extra = [];
+  for (const item of stores) {
+    if (item.owner === code) continue;
+    if (item.key === "neon-crm-projects") {
+      const projects = (Array.isArray(item.data?.projects) ? item.data.projects : [])
+        .filter((project) => !project?.archived && employeeCodeOnProject(project, code));
+      if (projects.length) extra.push({ key: item.key, owner: item.owner, data: { projects, meetings: [] } });
+    }
+    if (item.key === "neon-crm-tasks" && Array.isArray(item.data)) {
+      const tasks = item.data.filter((task) => String(task?.assigneeCode || "").trim().toUpperCase() === code);
+      if (tasks.length) extra.push({ key: item.key, owner: item.owner, data: tasks });
+    }
+  }
+  return extra;
+}
+
+async function mergeEmployeeTasks(owner, username, incoming) {
+  const code = String(username || "").trim().toUpperCase();
+  const existing = await Store.findOne({ key: "neon-crm-tasks", owner }).lean();
+  const current = Array.isArray(existing?.data) ? existing.data : [];
+  const kept = current.filter((task) => String(task?.assigneeCode || "").trim().toUpperCase() !== code);
+  const mine = (Array.isArray(incoming) ? incoming : [])
+    .filter((task) => String(task?.assigneeCode || "").trim().toUpperCase() === code);
+  await Store.findOneAndUpdate(
+    { key: "neon-crm-tasks", owner },
+    { key: "neon-crm-tasks", owner, data: [...mine, ...kept] },
+    { upsert: true, setDefaultsOnInsert: true }
+  );
 }
 
 async function passwordMatches(user, password) {
@@ -209,12 +261,14 @@ export function createApp() {
     if (!user) return res.status(401).json({ error: "Sign in again." });
     const users = await User.find().sort({ username: 1 });
     const stores = await Store.find();
+    const visible = stores
+      .filter((item) => canReadStore(req.user, item.key, item.owner))
+      .map((item) => ({ key: item.key, owner: item.owner, data: item.data }));
+    const assigned = req.user.role === "employee" ? employeeAssignedStores(stores, req.user.username) : [];
     res.json({
       user: publicUser(user),
       users: users.map((item) => publicUser(item)),
-      stores: stores
-        .filter((item) => canReadStore(req.user, item.key, item.owner))
-        .map((item) => ({ key: item.key, owner: item.owner, data: item.data })),
+      stores: [...visible, ...assigned],
     });
   });
 
@@ -473,6 +527,137 @@ export function createApp() {
     res.json({ ok: true });
   });
 
+  app.post("/api/registry/claim", requireAuth, async (req, res) => {
+    if (!canWriteStore(req.user, REGISTRY_KEY, COMPANY)) {
+      return res.status(403).json({ error: "You cannot reserve an ID." });
+    }
+    try {
+      const code = await claimRegistryCode(req.body?.book, req.body?.preferred, { exact: Boolean(req.body?.exact) });
+      res.json({ ok: true, code });
+    } catch (error) {
+      const status = error instanceof RegistryError ? error.status : 500;
+      res.status(status).json({ error: error instanceof RegistryError ? error.message : "Could not reserve an ID." });
+    }
+  });
+
+  app.get("/api/registry/phone", requireAuth, async (req, res) => {
+    if (!canReadStore(req.user, REGISTRY_KEY, COMPANY)) {
+      return res.status(403).json({ error: "You cannot look up that phone number." });
+    }
+    const holder = await leadPhoneOwner(req.query?.phone);
+    res.json({ ok: true, holder });
+  });
+
+  app.post("/api/registry/phone", requireAuth, async (req, res) => {
+    if (!canWriteStore(req.user, REGISTRY_KEY, COMPANY)) {
+      return res.status(403).json({ error: "You cannot reserve a phone number." });
+    }
+    try {
+      await reserveLeadPhone(req.body?.leadId, req.body?.phone);
+      res.json({ ok: true });
+    } catch (error) {
+      const status = error instanceof RegistryError ? error.status : 500;
+      res.status(status).json({ error: error instanceof RegistryError ? error.message : "Could not save that phone number." });
+    }
+  });
+
+  app.post("/api/registry/phone/release", requireAuth, async (req, res) => {
+    if (!canWriteStore(req.user, REGISTRY_KEY, COMPANY)) {
+      return res.status(403).json({ error: "You cannot change a phone number." });
+    }
+    await releaseLeadPhone(req.body?.leadId);
+    res.json({ ok: true });
+  });
+
+  app.post("/api/finance/project-invoices", requireAuth, async (req, res) => {
+    const role = req.user.role;
+    if (role !== "sales" && role !== "ceo") {
+      return res.status(403).json({ error: "Only sales can submit a payment for approval." });
+    }
+    const body = req.body || {};
+    const salesOwner = String(body.salesOwner || "").trim().toUpperCase();
+    const paymentId = String(body.paymentId || "").trim();
+    const quoteId = String(body.quoteId || "").trim();
+    const amount = Number(body.amount);
+    const received = Number.isFinite(amount) && amount > 0 ? Math.round(amount * 100) / 100 : 0;
+    if (role === "sales" && salesOwner !== String(req.user.username || "").toUpperCase()) {
+      return res.status(403).json({ error: "You can only submit your own payment." });
+    }
+    if (!paymentId || !quoteId || !salesOwner || received <= 0) {
+      return res.status(400).json({ error: "Payment details are incomplete." });
+    }
+    const financeKey = "neon-crm-finance";
+    const noticesKey = "neon-crm-notices";
+    const existingStore = await Store.findOne({ key: financeKey, owner: COMPANY }).lean();
+    const current = existingStore?.data && typeof existingStore.data === "object" && !Array.isArray(existingStore.data)
+      ? existingStore.data
+      : {};
+    const invoices = Array.isArray(current.projectInvoices) ? current.projectInvoices : [];
+    const found = invoices.find((item) => item?.paymentId === paymentId && String(item.salesOwner || "").toUpperCase() === salesOwner);
+    if (found) return res.json({ ok: true, invoice: found });
+    const sequence = invoices.filter((item) => item?.quoteId === quoteId).length + 1;
+    const stem = String(body.clientName || body.company || "CLT").replace(/[^A-Za-z0-9]/g, "").slice(0, 8).toUpperCase() || "CLT";
+    const invoice = {
+      id: crypto.randomUUID(),
+      receiptNo: `RCP-${stem}-${String(sequence).padStart(3, "0")}`,
+      paymentId,
+      salesOwner,
+      pmOwners: Array.isArray(body.pmOwners) ? body.pmOwners.map(String) : [],
+      sharedWithPms: body.sharedWithPms === true,
+      quoteId,
+      quoteNumber: String(body.quoteNumber || ""),
+      quoteTotal: Number.isFinite(Number(body.quoteTotal)) ? Math.round(Number(body.quoteTotal) * 100) / 100 : 0,
+      projectName: String(body.projectName || ""),
+      projectDetail: String(body.projectDetail || ""),
+      clientName: String(body.clientName || ""),
+      company: String(body.company || ""),
+      contact: String(body.contact || ""),
+      amount: received,
+      type: String(body.type || ""),
+      method: String(body.method || ""),
+      transactionId: String(body.transactionId || ""),
+      date: String(body.date || ""),
+      approval: "pending",
+    };
+    await Store.findOneAndUpdate(
+      { key: financeKey, owner: COMPANY },
+      {
+        key: financeKey,
+        owner: COMPANY,
+        data: {
+          ...current,
+          payments: Array.isArray(current.payments) ? current.payments : [],
+          expenses: Array.isArray(current.expenses) ? current.expenses : [],
+          revenue: Array.isArray(current.revenue) ? current.revenue : [],
+          categories: Array.isArray(current.categories) ? current.categories : [],
+          projectInvoices: [invoice, ...invoices],
+        },
+      },
+      { upsert: true, setDefaultsOnInsert: true }
+    );
+    const noticeStore = await Store.findOne({ key: noticesKey, owner: COMPANY }).lean();
+    const notices = Array.isArray(noticeStore?.data) ? [...noticeStore.data] : [];
+    const who = invoice.clientName || invoice.projectName || "a client";
+    const text = `${salesOwner} submitted a payment of LKR ${received.toLocaleString("en-US")} for ${who}. Review it under Sales, Sales & Collection Approvals.`;
+    const ceos = await User.find({ role: "ceo", active: { $ne: false } }).select("username").lean();
+    ceos.forEach((ceo) => {
+      if (notices.some((item) => item?.to === ceo.username && item?.text === text)) return;
+      notices.unshift({
+        id: crypto.randomUUID(),
+        to: ceo.username,
+        text,
+        invoiceId: invoice.id,
+        created: new Date().toISOString(),
+      });
+    });
+    await Store.findOneAndUpdate(
+      { key: noticesKey, owner: COMPANY },
+      { key: noticesKey, owner: COMPANY, data: notices.slice(0, 80) },
+      { upsert: true, setDefaultsOnInsert: true }
+    );
+    res.json({ ok: true, invoice });
+  });
+
   app.put("/api/stores/batch", requireAuth, async (req, res) => {
     const items = Array.isArray(req.body?.items) ? req.body.items : [];
     const rejected = [];
@@ -481,19 +666,43 @@ export function createApp() {
       const key = String(item?.key || "").trim();
       const owner = String(item?.owner || COMPANY).trim() || COMPANY;
       if (!key) continue;
-      if (!canWriteStore(req.user, key, owner)) {
+      const ownTasks = req.user.role === "employee"
+        && key === "neon-crm-tasks"
+        && owner !== req.user.username
+        && owner !== COMPANY
+        && !item.deleted;
+      if (!canWriteStore(req.user, key, owner) && !ownTasks) {
         rejected.push({ key, owner });
         continue;
       }
-      accepted.push({ key, owner, deleted: Boolean(item.deleted), data: item.deleted ? undefined : item.data ?? null });
+      accepted.push({
+        key,
+        owner,
+        deleted: Boolean(item.deleted),
+        data: item.deleted ? undefined : item.data ?? null,
+        mergeEmployeeTasks: ownTasks,
+      });
     }
     if (rejected.length) {
       await writeAudit(req.user.username, "stores.denied", { rejected });
-      return res.status(403).json({ error: "You cannot change another account’s records." });
+    }
+    if (!accepted.length) {
+      if (rejected.length) {
+        return res.status(403).json({ error: "You cannot change another account’s records.", rejected });
+      }
+      return res.json({ ok: true, rejected: [] });
     }
     for (const item of accepted) {
+      if (item.mergeEmployeeTasks) {
+        await mergeEmployeeTasks(item.owner, req.user.username, item.data);
+        continue;
+      }
       if (item.deleted) {
         await Store.deleteOne({ key: item.key, owner: item.owner });
+        continue;
+      }
+      if (item.key === REGISTRY_KEY && item.owner === COMPANY) {
+        await unionRegistryIds(item.data);
         continue;
       }
       await Store.findOneAndUpdate(
@@ -507,7 +716,7 @@ export function createApp() {
         items: accepted.map((item) => ({ key: item.key, owner: item.owner, deleted: item.deleted })),
       });
     }
-    res.json({ ok: true });
+    res.json({ ok: true, rejected });
   });
 
   app.delete("/api/stores/owner/:owner", requireAuth, requireCeo, async (req, res) => {

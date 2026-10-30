@@ -197,3 +197,75 @@ test("a CEO reset link is single use", async () => {
   const login = await json("/api/auth/login", { method: "POST", body: { username: "CEO001", password: "newceo123" } });
   assert.equal(login.res.status, 200);
 });
+
+test("lead, client, and project IDs and lead phones cannot be reserved twice", async () => {
+  const bcrypt = (await import("bcryptjs")).default;
+  const sales = await User.findOne({ username: "SD001" });
+  if (!sales) {
+    await User.create({
+      username: "SD001",
+      role: "sales",
+      passwordHash: await bcrypt.hash("sales123", 10),
+      passwordSource: "updated",
+      active: true,
+    });
+  }
+  await User.updateOne({ username: "CEO001" }, { $set: { passwordHash: await bcrypt.hash("ceo12345", 10) } });
+  const signedIn = await json("/api/auth/login", { method: "POST", body: { username: "SD001", password: "sales123" } });
+  if (signedIn.res.status !== 200) {
+    const issued = await json("/api/auth/login", { method: "POST", body: { username: "SD001", password: "issued123" } });
+    assert.equal(issued.res.status, 200);
+    signedIn.data.token = issued.data.token;
+  }
+  const token = signedIn.data.token;
+  const [first, second] = await Promise.all([
+    json("/api/registry/claim", { method: "POST", token, body: { book: "leads" } }),
+    json("/api/registry/claim", { method: "POST", token, body: { book: "leads" } }),
+  ]);
+  assert.equal(first.res.status, 200);
+  assert.equal(second.res.status, 200);
+  assert.match(first.data.code, /^LEAD-\d{4}$/);
+  assert.match(second.data.code, /^LEAD-\d{4}$/);
+  assert.notEqual(first.data.code, second.data.code);
+  const client = await json("/api/registry/claim", { method: "POST", token, body: { book: "clients" } });
+  assert.equal(client.res.status, 200);
+  assert.match(client.data.code, /^CLI\d{3}$/);
+  const again = await json("/api/registry/claim", { method: "POST", token, body: { book: "leads", preferred: first.data.code, exact: true } });
+  assert.equal(again.res.status, 409);
+  const project = await json("/api/registry/claim", { method: "POST", token, body: { book: "projects", preferred: "NPRJ001", exact: true } });
+  assert.equal(project.res.status, 200);
+  assert.equal(project.data.code, "NPRJ001");
+  const duplicateProject = await json("/api/registry/claim", { method: "POST", token, body: { book: "projects", preferred: "nprj001", exact: true } });
+  assert.equal(duplicateProject.res.status, 409);
+  const phone = "0770000000";
+  const reserved = await json("/api/registry/phone", { method: "POST", token, body: { leadId: first.data.code, phone } });
+  assert.equal(reserved.res.status, 200);
+  const taken = await json("/api/registry/phone", { method: "POST", token, body: { leadId: "LEAD-9999", phone } });
+  assert.equal(taken.res.status, 409);
+  const holder = await json(`/api/registry/phone?phone=${phone}`, { token });
+  assert.equal(holder.res.status, 200);
+  assert.equal(holder.data.holder, first.data.code);
+  const kept = await json("/api/stores/batch", {
+    method: "PUT",
+    token,
+    body: { items: [{ key: "neon-crm-registry", owner: "company", data: { leads: { sequence: 1, ids: { "LEAD-0008": true } }, phones: {} } }] },
+  });
+  assert.equal(kept.res.status, 200);
+  const stillHeld = await json(`/api/registry/phone?phone=${phone}`, { token });
+  assert.equal(stillHeld.data.holder, first.data.code);
+  const employee = await json("/api/auth/login", { method: "POST", body: { username: "EMP001", password: "employee1" } });
+  if (employee.res.status !== 200) {
+    await User.create({
+      username: "EMP001",
+      role: "employee",
+      passwordHash: await bcrypt.hash("employee1", 10),
+      passwordSource: "updated",
+      active: true,
+    });
+  }
+  const staff = employee.res.status === 200
+    ? employee
+    : await json("/api/auth/login", { method: "POST", body: { username: "EMP001", password: "employee1" } });
+  const denied = await json("/api/registry/claim", { method: "POST", token: staff.data.token, body: { book: "leads" } });
+  assert.equal(denied.res.status, 403);
+});
