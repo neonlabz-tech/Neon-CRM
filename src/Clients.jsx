@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { blankClient, blankSubContact, INDUSTRIES, nextClientCode, saveClients, TIERS } from "./clients.js";
 import { publishClients, pushPmToMarketing } from "./clientSync.js";
 import { clientsWithPaying, salesClientByName, salesClientDirectory } from "./sales.js";
+import { EMAIL_ERROR, PHONE_ERROR, emailError, formatPhone, phoneError } from "./hrms.js";
 import { dataOwner } from "./scope.js";
 
 function companyClient(client) {
@@ -35,18 +36,20 @@ export function ClientsWorkspace({ personal = false } = {}) {
     const name = client.name.trim();
     if (!name) return "Company name is required.";
     if (!client.contactName.trim()) return "Client main person name is required.";
-    if (client.contactEmail.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(client.contactEmail.trim())) return "Enter a valid email address.";
+    if (emailError(client.contactEmail)) return EMAIL_ERROR;
+    if (phoneError(client.contactPhone)) return PHONE_ERROR;
     const subContacts = (client.subContacts || [])
       .map((person) => ({
         ...person,
         name: person.name.trim(),
         title: person.title.trim(),
         email: person.email.trim(),
-        phone: person.phone.trim(),
+        phone: formatPhone(person.phone),
       }))
       .filter((person) => person.name || person.title || person.email || person.phone);
     if (subContacts.some((person) => !person.name)) return "Each sub contact needs a name.";
-    if (subContacts.some((person) => person.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(person.email))) return "Enter a valid email for each sub contact.";
+    if (subContacts.some((person) => emailError(person.email))) return EMAIL_ERROR;
+    if (subContacts.some((person) => phoneError(person.phone))) return PHONE_ERROR;
     const duplicate = clients.some((item) => item.id !== client.id && item.name.toLowerCase() === name.toLowerCase());
     if (duplicate) return "That company is already in the client list.";
     const saved = {
@@ -56,7 +59,7 @@ export function ClientsWorkspace({ personal = false } = {}) {
       contactTitle: client.contactTitle.trim(),
       assignedPerson: (client.assignedPerson || "").trim(),
       contactEmail: client.contactEmail.trim(),
-      contactPhone: client.contactPhone.trim(),
+      contactPhone: formatPhone(client.contactPhone),
       address: client.address.trim(),
       notes: client.notes.trim(),
       subContacts,
@@ -245,7 +248,7 @@ function ClientDialog({ client, onClose, onSave, salesPick = true }) {
           </label>
           <label>
             Contact number
-            <input value={draft.contactPhone} onChange={(event) => setField("contactPhone", event.target.value)} />
+            <input value={draft.contactPhone} onChange={(event) => setField("contactPhone", formatPhone(event.target.value))} placeholder="077-123-4567" maxLength={16} />
           </label>
           <label>
             Email address
@@ -279,7 +282,7 @@ function ClientDialog({ client, onClose, onSave, salesPick = true }) {
               </label>
               <label>
                 Phone number
-                <input value={person.phone} onChange={(event) => updateSubContact(person.id, "phone", event.target.value)} />
+                <input value={person.phone} onChange={(event) => updateSubContact(person.id, "phone", formatPhone(event.target.value))} placeholder="077-123-4567" maxLength={16} />
               </label>
             </div>
           </section>

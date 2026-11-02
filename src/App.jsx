@@ -546,7 +546,7 @@ function Shell({ session, onSignOut }) {
                   aria-expanded={item.children ? expanded : undefined}
                   onClick={() => (item.children ? toggleGroup(item) : (setOpenGroup(""), openPage(item.id)))}
                 >
-                  <NavGlyph name={navIconFor(item.id)} />
+                  <NavGlyph name={navIconFor(item.id, item.label)} />
                   <span>{item.label}</span>
                 </button>
                 {expanded ? (
@@ -558,7 +558,7 @@ function Shell({ session, onSignOut }) {
                         className={child.id === current.id ? "nav-item sub active" : "nav-item sub"}
                         onClick={() => openPage(child.id)}
                       >
-                        <NavGlyph name={navIconFor(child.id)} />
+                        <NavGlyph name={navIconFor(child.id, child.label)} />
                         <span>{child.label}</span>
                       </button>
                     ))}
@@ -594,7 +594,7 @@ function Shell({ session, onSignOut }) {
             </button>
             {history.length > 1 ? <BackButton onClick={goBack} label="Back" /> : null}
             <div>
-              <h1>{current.label}</h1>
+              <h1>{session.role === "marketing" && current.id === "marketing" ? "Reports" : current.label}</h1>
             </div>
           </div>
           <div className="topbar-tools">
@@ -728,7 +728,7 @@ function accessCopy(role, pageId, access) {
     return "A summary of every CEO section, including payments waiting for approval.";
   }
   if (pageId === "pm-overview") {
-    return "A summary of projects, tasks, issues, clients, packages, reports, and the team.";
+    return "A summary of projects, tasks, issues, clients, and reports.";
   }
   if (pageId === "marketing-overview") {
     return "A summary of info documents, content plans, reports, and brands.";
@@ -1507,10 +1507,11 @@ function LogoutIcon() {
   );
 }
 
-function navIconFor(id) {
+function navIconFor(id, label = "") {
   if (id.includes("overview") || id === "employee-home") return "home";
   if (id.includes("task")) return "check";
   if (id.includes("issue")) return "alert";
+  if (id === "marketing" && label === "Reports") return "file";
   if (id.includes("marketing")) return "chart";
   if (id.includes("client") || id === "hrms" || id === "users" || id === "team") return "users";
   if (id.includes("package")) return "box";

@@ -230,7 +230,7 @@ function RecordFields({ tab, draft, setDraft, data }) {
       <div className="sales-grid">
         <label>Full name<input value={draft.name} onChange={(event) => setField("name", event.target.value)} required maxLength={200} /></label>
         <label>Email address<input type="email" value={draft.email} onChange={(event) => setField("email", event.target.value)} required maxLength={200} /></label>
-        <label>Phone number<input type="tel" inputMode="numeric" value={draft.phone} onChange={(event) => setField("phone", formatPhone(event.target.value))} placeholder="000-000-0000" required maxLength={12} /></label>
+        <label>Phone number<input type="tel" inputMode="tel" value={draft.phone} onChange={(event) => setField("phone", formatPhone(event.target.value))} placeholder="077-123-4567" required maxLength={16} /></label>
         <label>Joining date<input type="date" value={draft.join} onChange={(event) => setField("join", event.target.value)} required /></label>
         <label>
           Role designation

@@ -170,7 +170,7 @@ async function migrateUsers() {
   await User.updateMany({ password: { $exists: true } }, { $unset: { password: 1 } });
 }
 
-async function seedCeo() {
+export async function seedCeo() {
   await migrateUsers();
   const existing = await User.findOne({ username: "CEO001" });
   if (existing) return;
@@ -184,7 +184,7 @@ async function seedCeo() {
   console.log("Seeded CEO001. Sign in and set a new password of at least 8 characters.");
 }
 
-async function ensureCeoRecoveryEmail() {
+export async function ensureCeoRecoveryEmail() {
   const email = ceoRecoveryEmail();
   await User.updateOne(
     { username: "CEO001", $or: [{ email: { $exists: false } }, { email: null }, { email: "" }] },
@@ -447,14 +447,16 @@ export function createApp() {
     if (!fullName) return res.status(400).json({ error: "Enter your full name." });
     if (fullName.length > 120) return res.status(400).json({ error: "Full name must be 120 characters or fewer." });
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: "Enter a valid email address." });
-    if (phoneDigits && phoneDigits.length !== 10) return res.status(400).json({ error: "Enter a 10-digit phone number, or leave the phone blank." });
+    const localPhone = phoneDigits.startsWith("94") && phoneDigits.length > 10 ? `0${phoneDigits.slice(2)}` : phoneDigits;
+    const sriLankan = /^07[01245678]\d{7}$/.test(localPhone) || /^0(?:11|21|23|24|25|26|27|31|32|33|34|35|36|37|38|41|45|47|51|52|54|55|57|63|65|66|67|81|91)\d{7}$/.test(localPhone);
+    if (localPhone && !sriLankan) return res.status(400).json({ error: "Enter a Sri Lankan phone number, such as 077-123-4567 or 011-234-5678, or leave the phone blank." });
     if (address.length > 300) return res.status(400).json({ error: "Address must be 300 characters or fewer." });
     const taken = await User.findOne({ email, username: { $ne: user.username } });
     if (taken) return res.status(400).json({ error: "That email is already used by another account." });
     const emailChanged = email !== user.email;
     user.fullName = fullName;
     user.email = email;
-    user.phone = phoneDigits;
+    user.phone = localPhone;
     user.address = address;
     await user.save();
     await writeAudit(user.username, "profile.updated", { emailChanged });

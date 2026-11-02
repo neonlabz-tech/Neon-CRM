@@ -1,13 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, readSession, writeSession } from "./api.js";
+import { EMAIL_ERROR, PHONE_ERROR, emailError, formatPhone, phoneError } from "./hrms.js";
 import { getUsers, setUsers } from "./storage.js";
-
-function formatPhone(value) {
-  const digits = String(value || "").replace(/\D/g, "").slice(0, 10);
-  if (digits.length <= 3) return digits;
-  if (digits.length <= 6) return `${digits.slice(0, 3)}-${digits.slice(3)}`;
-  return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`;
-}
 
 export function CeoProfile({ onClose }) {
   const [username, setUsername] = useState("");

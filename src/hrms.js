@@ -176,15 +176,43 @@ function nextEmployeeCode(employees) {
   return formatEmployeeCode(max + 1);
 }
 
-function validEmail(value) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+export const EMAIL_ERROR = "Enter an email address with an @ and a domain, such as name@company.com.";
+export const PHONE_ERROR = "Enter a Sri Lankan phone number, such as 077-123-4567 or 011-234-5678.";
+
+export function validEmail(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || "").trim());
+}
+
+export function phoneDigits(value) {
+  let digits = String(value || "").replace(/\D/g, "");
+  if (digits.startsWith("94") && digits.length > 10) digits = `0${digits.slice(2)}`;
+  return digits.slice(0, 10);
 }
 
 export function formatPhone(value) {
-  const digits = String(value || "").replace(/\D/g, "").slice(0, 10);
+  const digits = phoneDigits(value);
   if (digits.length <= 3) return digits;
   if (digits.length <= 6) return `${digits.slice(0, 3)}-${digits.slice(3)}`;
   return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`;
+}
+
+export function validSriLankanPhone(value) {
+  const digits = phoneDigits(value);
+  if (!/^0\d{9}$/.test(digits)) return false;
+  if (/^07[01245678]\d{7}$/.test(digits)) return true;
+  return /^0(?:11|21|23|24|25|26|27|31|32|33|34|35|36|37|38|41|45|47|51|52|54|55|57|63|65|66|67|81|91)\d{7}$/.test(digits);
+}
+
+export function emailError(value, { required = false } = {}) {
+  const email = String(value || "").trim();
+  if (!email) return required ? "Email address is required." : "";
+  return validEmail(email) ? "" : EMAIL_ERROR;
+}
+
+export function phoneError(value, { required = false } = {}) {
+  const digits = phoneDigits(value);
+  if (!digits) return required ? "Phone number is required." : "";
+  return validSriLankanPhone(value) ? "" : PHONE_ERROR;
 }
 
 export function saveDepartment(data, draft) {
@@ -228,8 +256,8 @@ export async function saveEmployee(data, draft) {
   const role = draft.role === "Custom Role" ? draft.customRole.trim() : draft.role;
   const department = (data.departments || []).find((entry) => entry.id === draft.department);
   if (!name || !email || !phone || !draft.join || !role) return { ok: false, error: "Complete the employee details." };
-  if (!validEmail(email)) return { ok: false, error: "Enter a valid email address." };
-  if (phone.replace(/\D/g, "").length !== 10) return { ok: false, error: "Enter a 10-digit phone number as 000-000-0000." };
+  if (!validEmail(email)) return { ok: false, error: EMAIL_ERROR };
+  if (!validSriLankanPhone(phone)) return { ok: false, error: PHONE_ERROR };
   if (!EMPLOYMENT_STATUSES.includes(draft.status)) return { ok: false, error: "Choose an employment status." };
   if (!department) return { ok: false, error: "Choose a department. Add the department before adding people." };
   if (!MEMBER_TYPES.some((entry) => entry.id === draft.memberType)) return { ok: false, error: "Choose Admin or Team member." };

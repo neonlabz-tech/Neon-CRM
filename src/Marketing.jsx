@@ -31,7 +31,7 @@ import {
 } from "./marketing.js";
 import { isVisibleToMarketing, marketingFieldsFromPm, marketingServiceClients, publishClients, pushMarketingToPm } from "./clientSync.js";
 import { notifyUser } from "./finance.js";
-import { teamMembersFor } from "./hrms.js";
+import { EMAIL_ERROR, PHONE_ERROR, emailError, formatPhone, phoneError, teamMembersFor } from "./hrms.js";
 import { KanbanBoard } from "./Kanban.jsx";
 import { claimProjectCode } from "./registry.js";
 import { assignMarketingTeam, blankMilestone, canonicalProjectCode, canManageDepartment, companyProjectCodes, deleteMarketingMilestone, marketingProjects, milestoneDepartment, milestoneTasksComplete, normalizeAssignees, projectCodeTaken, removeMarketingProjectFromDoc, saveMarketingMilestone, saveMarketingProjectDates, suggestCompanyProjectCode, syncOwnerProjectProgress, todayIso, upsertMarketingProjectFromDoc } from "./projects.js";
@@ -1375,7 +1375,7 @@ function InfoDocEditor({ client, onCancel, onSave }) {
           <Field label="Business email address" value={draft.email} onChange={(value) => setField("email", value)} type="email" />
           <Field label="Phone number" value={draft.phone || ""} onChange={(value) => setField("phone", value)} />
           <Field label="Website URL" value={draft.website} onChange={(value) => setField("website", value)} />
-          <Field label="Operating hours / days" value={draft.hours} onChange={(value) => setField("hours", value)} />
+          <Field label="Phone number" value={draft.phone || ""} onChange={(value) => setField("phone", formatPhone(value))} />
           <Field className="span-2" label="Business address" value={draft.address} onChange={(value) => setField("address", value)} />
           <Field className="span-2" label="Preferred contact method and time" value={draft.preferredContact} onChange={(value) => setField("preferredContact", value)} />
         </div>
