@@ -5,7 +5,7 @@ import { formatScopeHtml, sanitizeScopeHtml, scopeHasText } from "./richText.js"
 import { loadUsers } from "./crm.js";
 import { invoiceDocumentFromPayment, invoiceDocumentFromQuote } from "./brandDocument.js";
 import { approveProjectInvoice, loadFinance, notifyRole, notifyUser, projectInvoiceFor, queueProjectInvoice, rememberPayingClient } from "./finance.js";
-import { formatPhone } from "./hrms.js";
+import { EMAIL_ERROR, PHONE_ERROR, emailError, formatPhone, phoneDigits as sriPhoneDigits, phoneError } from "./hrms.js";
 import { dataOwner, readAccount, sessionAccount, writeScoped } from "./scope.js";
 import { crmStorage } from "./storage.js";
 
@@ -1346,6 +1346,14 @@ export function inReportingPeriod(date, month, range) {
 }
 
 export function confirmedRevenue(data, username, month) {
+export function matchesPeriod(record, month, range, keys = ["date"]) {
+  const dates = keys
+    .map((key) => String(record?.[key] || "").slice(0, 10))
+    .filter((value) => /^\d{4}-\d{2}-\d{2}$/.test(value));
+  if (!dates.length) return !range?.from && !range?.to && month === todayISO().slice(0, 7);
+  return dates.some((value) => inReportingPeriod(value, month, range));
+}
+
   return data.payments
     .filter((payment) => payment.executive === username && payment.status === "confirmed" && monthKey(payment.date) === month)
     .reduce((sum, payment) => sum + payment.amount, 0);
@@ -1395,6 +1403,9 @@ function quoteFromDraft(data, draft) {
   if (!draft.date) return { ok: false, error: "Quotation date is required." };
   const valid = draft.valid || (salesQuote ? addDays(draft.date, 14) : "");
   if (!salesQuote && !valid) return { ok: false, error: "Quotation date and validity are required." };
+  if (valid && valid < draft.date) return { ok: false, error: "Validity date cannot be before the quotation date." };
+  if (emailError(draft.email)) return { ok: false, error: EMAIL_ERROR };
+  if (phoneError(draft.phone)) return { ok: false, error: PHONE_ERROR };
   if (valid && valid < draft.date) return { ok: false, error: "Validity date cannot be before the quotation date." };
   const lines = Array.isArray(draft.lines) ? draft.lines : [];
   if (!lines.length) return { ok: false, error: "Add at least one package." };
@@ -1448,8 +1459,7 @@ function quoteFromDraft(data, draft) {
         ? [converted.email, converted.phone].filter(Boolean).join(" · ")
         : [draft.email, draft.phone].filter(Boolean).join(" · ") || String(draft.contact || "").trim(),
       email: salesQuote ? converted.email : String(draft.email || "").trim(),
-      phone: salesQuote ? converted.phone : String(draft.phone || "").trim(),
-      address: salesQuote ? converted.address : String(draft.address || "").trim(),
+      phone: salesQuote ? converted.phone : formatPhone(draft.phone),
       projectName: salesQuote ? converted.business : String(draft.projectName || "").trim(),
       items,
       service: [...new Set(items.map((line) => line.service).filter(Boolean))].join(", "),
@@ -1822,8 +1832,7 @@ export function saveLead(data, draft) {
   const phone = formatPhone(draft.phone);
   const digits = phoneDigits(phone);
   if (digits.length && digits.length !== 10) {
-    return { ok: false, error: "Enter a 10-digit phone number." };
-  }
+  if (phoneError(phone)) return { ok: false, error: PHONE_ERROR };
   const samePhone = existing && phoneDigits(existing.phone) === digits;
   if (digits.length === 10 && !samePhone && leadPhoneTaken(phone, existing?.id || "")) {
     return { ok: false, error: LEAD_PHONE_EXISTS_MESSAGE };
@@ -1831,12 +1840,12 @@ export function saveLead(data, draft) {
   const email = String(draft.email || "").trim();
   const address = String(draft.address || "").trim();
   if (status === "Converted") {
-    if (!email || !address || digits.length !== 10) {
-      return { ok: false, error: "Enter email, a 10-digit phone number, and address before marking Converted. That lead is then listed under Quotations as a client." };
+    if (!email || !address || !digits) {
+      return { ok: false, error: "Enter email, a Sri Lankan phone number, and address before marking Converted. That lead is then listed under Quotations as a client." };
     }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { ok: false, error: "Enter a valid email address." };
+    if (emailError(email, { required: true })) return { ok: false, error: EMAIL_ERROR };
   }
-  const id = existing ? existing.id : claimLeadId(draft.id);
+  if (emailError(email)) return { ok: false, error: EMAIL_ERROR };
   if (!id) return { ok: false, error: "Lead ID is required." };
   let calls = Array.isArray(existing?.calls) ? existing.calls.map(normalizeCall).filter(Boolean) : [];
   if (draft.call) {

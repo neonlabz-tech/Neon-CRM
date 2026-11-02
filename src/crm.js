@@ -98,22 +98,10 @@ const NAV = [
     access: { pm: "full" },
   },
   {
-    id: "packages",
-    label: "Packages",
-    roles: ["pm"],
-    access: { pm: "view" },
-  },
-  {
     id: "reports",
     label: "Reports",
     roles: ["pm"],
     access: { pm: "full" },
-  },
-  {
-    id: "team",
-    label: "Team",
-    roles: ["pm"],
-    access: { pm: "view" },
   },
   {
     id: "marketing-overview",
@@ -595,7 +583,9 @@ export function findUser(username) {
 }
 
 export function navForRole(role) {
-  return NAV.filter((item) => item.roles.includes(role));
+  return NAV.filter((item) => item.roles.includes(role)).map((item) => (
+    role === "marketing" && item.id === "marketing" ? { ...item, label: "Reports" } : item
+  ));
 }
 
 export function findNav(pageId) {

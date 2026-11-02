@@ -594,7 +594,7 @@ function Shell({ session, onSignOut }) {
             </button>
             {history.length > 1 ? <BackButton onClick={goBack} label="Back" /> : null}
             <div>
-              <h1>{current.label}</h1>
+              <h1>{session.role === "marketing" && current.id === "marketing" ? "Reports" : current.label}</h1>
             </div>
           </div>
           <div className="topbar-tools">
@@ -728,7 +728,7 @@ function accessCopy(role, pageId, access) {
     return "A summary of every CEO section, including payments waiting for approval.";
   }
   if (pageId === "pm-overview") {
-    return "A summary of projects, tasks, issues, clients, packages, reports, and the team.";
+    return "A summary of projects, tasks, issues, clients, and reports.";
   }
   if (pageId === "marketing-overview") {
     return "A summary of info documents, content plans, reports, and brands.";

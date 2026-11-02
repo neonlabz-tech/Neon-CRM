@@ -6,6 +6,8 @@ import { KanbanBoard } from "./Kanban.jsx";
 import { notifyRole, notifyUser } from "./finance.js";
 import { loadHrms } from "./hrms.js";
 import { employeeMilestones, formatDate, milestoneDepartment, projectsForEmployee, syncOwnerProjectProgress } from "./projects.js";
+import { MonthField, reportingLabel, useReportPeriod } from "./ReportPeriod.jsx";
+import { matchesPeriod } from "./sales.js";
 import { sessionAccount } from "./scope.js";
 import {
   TASK_PRIORITIES,
@@ -131,21 +133,27 @@ function ProgressBar({ value }) {
 }
 
 function DashboardPage({ desk }) {
-  const { person, projects, tasks } = desk;
+  const period = useReportPeriod();
+  const { person } = desk;
+  const tasks = desk.tasks.filter((task) => matchesPeriod(task, period.month, period.range, ["startDate", "dueDate", "completedAt", "doneAt"]));
+  const projects = desk.projects.filter((project) => matchesPeriod(project, period.month, period.range, ["startDate", "dueDate"]) || tasks.some((task) => task.projectId === project.id));
   const completed = tasks.filter((task) => task.status === "completed" || task.status === "done").length;
   const pct = tasks.length ? Math.round((completed / tasks.length) * 100) : 0;
   const overdue = tasks.filter(isOverdue);
   const upcoming = tasks.filter(isSoon).sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate)));
-  const week = lastDays(7).map((day) => ({
+  const week = periodDays(period.month, period.range).map((day) => ({
     ...day,
     count: tasks.filter((task) => sameDay(task.completedAt || task.doneAt, day.date)).length,
   }));
 
   return (
     <div className="stack emp-desk">
-      <div>
-        <h2>Good {greeting()}, {firstName(person)}</h2>
-        <p>Here is your task and project overview.</p>
+      <div className="toolbar sales-head">
+        <div>
+          <h2>Good {greeting()}, {firstName(person)}</h2>
+          <p>Here is your task and project overview for {reportingLabel(period.month, period.range)}.</p>
+        </div>
+        <MonthField month={period.month} setMonth={period.setMonth} range={period.range} setRange={period.setRange} />
       </div>
       <section className="dash-metrics">
         <article className="dash-kpi tone-0"><span>Total projects</span><strong>{projects.length}</strong></article>
@@ -166,8 +174,8 @@ function DashboardPage({ desk }) {
         <ProgressBar value={pct} />
       </article>
       <article className="panel">
-        <h2>Last 7 days</h2>
-        <p>Tasks you marked Completed.</p>
+        <h2>Completed in {reportingLabel(period.month, period.range)}</h2>
+        <p>Tasks you marked Completed in this period.</p>
         <div className="emp-chart">
           {week.map((day) => (
             <div key={day.key}>
@@ -661,6 +669,25 @@ function TaskForm({ task, milestones, onClose, onSave }) {
     </div>,
     document.body
   );
+}
+
+function periodDays(month, range) {
+  const ranged = Boolean(range?.from && range?.to && String(range.from).startsWith(month));
+  const [year, mon] = String(month || "").split("-").map(Number);
+  const endDate = ranged ? range.to : `${month}-${String(new Date(year, mon, 0).getDate()).padStart(2, "0")}`;
+  const startDate = ranged ? range.from : `${month}-01`;
+  const rows = [];
+  const cursor = new Date(`${startDate}T00:00:00`);
+  const end = new Date(`${endDate}T00:00:00`);
+  while (cursor <= end && rows.length < 31) {
+    rows.push({
+      date: new Date(cursor),
+      key: cursor.toDateString(),
+      label: cursor.toLocaleDateString(undefined, { day: "numeric" }),
+    });
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return rows;
 }
 
 function lastDays(count) {
