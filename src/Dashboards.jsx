@@ -4,7 +4,6 @@ import {
   approveProjectInvoice,
   invoicesForUser,
   loadFinance,
-  MONTHS,
   salaryExpenses,
 } from "./finance.js";
 import { loadHrms } from "./hrms.js";
@@ -13,14 +12,16 @@ import { ISSUE_PRIORITIES, loadIssues } from "./issues.js";
 import { loadClients } from "./clients.js";
 import { companyProjects, loadProjects, marketingProjects, projectCounts, taskDepartment } from "./projects.js";
 import { loadReports } from "./reports.js";
+import { MonthField, reportingLabel, useReportPeriod } from "./ReportPeriod.jsx";
 import {
   formatMoney,
+  inReportingPeriod,
   loadCeoSales,
   loadPackages,
   loadSales,
+  matchesPeriod,
   releaseSalesPaymentsForApproval,
   salesPaymentRevenue,
-  todayISO,
 } from "./sales.js";
 import { dataOwner, readAccount, sessionAccount } from "./scope.js";
 import { BOARD_COLUMNS, loadTasks, tasksForOwner } from "./tasks.js";
@@ -34,7 +35,8 @@ export function CeoDashboard() {
   const [revision, setRevision] = useState(0);
   const [viewing, setViewing] = useState(null);
   const [error, setError] = useState("");
-  const picture = useMemo(() => ceoPicture(), [revision]);
+  const period = useReportPeriod();
+  const picture = useMemo(() => ceoPicture(period.month, period.range), [revision, period.month, period.range]);
   const finance = picture.finance;
   const waiting = finance.projectInvoices.filter((item) => item.approval !== "approved");
   const approved = finance.projectInvoices.filter((item) => item.approval === "approved");
@@ -51,11 +53,15 @@ export function CeoDashboard() {
 
   return (
     <div className="stack">
+      <div className="toolbar sales-head">
+        <p>Figures follow the reporting month. Click the selected month again to filter by dates.</p>
+        <MonthField month={period.month} setMonth={period.setMonth} range={period.range} setRange={period.setRange} />
+      </div>
       <div className="dash-tabs" role="tablist">
         <button type="button" role="tab" aria-selected={board === "company"} className={board === "company" ? "active" : ""} onClick={() => setBoard("company")}>Company</button>
         <button type="button" role="tab" aria-selected={board === "own"} className={board === "own" ? "active" : ""} onClick={() => setBoard("own")}>Own projects</button>
       </div>
-      {board === "own" ? <OwnProjectsBoard /> : (
+      {board === "own" ? <OwnProjectsBoard month={period.month} range={period.range} /> : (
       <>
       <Hero
         kicker="Neon Labz"
@@ -117,9 +123,9 @@ export function CeoDashboard() {
   );
 }
 
-function OwnProjectsBoard() {
+function OwnProjectsBoard({ month, range }) {
   const username = sessionAccount()?.username || "";
-  const picture = useMemo(() => ownPicture(username), [username]);
+  const picture = useMemo(() => ownPicture(username, month, range), [username, month, range]);
   return (
     <>
       <Hero
@@ -172,10 +178,15 @@ function OwnProjectsBoard() {
 
 export function PmDashboard() {
   const username = sessionAccount()?.username || "";
-  const picture = useMemo(() => pmPicture(username), [username]);
+  const period = useReportPeriod();
+  const picture = useMemo(() => pmPicture(period.month, period.range), [period.month, period.range]);
 
   return (
     <div className="stack">
+      <div className="toolbar sales-head">
+        <p>Project, task, issue, and report counts follow {reportingLabel(period.month, period.range)}.</p>
+        <MonthField month={period.month} setMonth={period.setMonth} range={period.range} setRange={period.setRange} />
+      </div>
       <Hero kicker={username} title="Project dashboard" note="" badge={`${picture.counts.inProgress} in progress`} tone="pm" />
       <section className="dash-metrics">
         <Metric tone={0} label="Projects" value={String(picture.counts.total)} />
@@ -192,8 +203,6 @@ export function PmDashboard() {
       <div className="chart-grid">
         <BarCard title="Clients" tone="slate" slices={picture.clientSlices} showDetail={false} />
         <BarCard title="Reports" tone="slate" slices={picture.reportSlices} showDetail={false} />
-        <BarCard title="Packages" tone="slate" slices={picture.packageSlices} showDetail={false} />
-        <BarCard title="Team" tone="slate" slices={picture.teamSlices} showDetail={false} />
       </div>
     </div>
   );
@@ -201,21 +210,28 @@ export function PmDashboard() {
 
 export function MdDashboard() {
   const username = sessionAccount()?.username || "";
+  const period = useReportPeriod();
   const data = loadMarketing();
-  const side = marketingSideCounts();
+  const plans = data.plans.filter((item) => matchesPeriod(item, period.month, period.range, ["startDate", "endDate"]));
+  const reports = data.reports.filter((item) => matchesPeriod(item, period.month, period.range, ["startDate", "endDate", "savedAt"]));
+  const side = marketingSideCounts(period.month, period.range);
   const work = [
     namedSlice("docs", "Info documents", data.clients.length, "#873CFF", []),
-    namedSlice("plans", "Content plans", data.plans.length, "#68A8FF", []),
-    namedSlice("reports", "Reports", data.reports.length, "#C412FC", []),
+    namedSlice("plans", "Content plans", plans.length, "#68A8FF", []),
+    namedSlice("reports", "Reports", reports.length, "#C412FC", []),
   ];
-  const projects = statusSlices(marketingProjects({ includeArchived: true }));
+  const projects = statusSlices(marketingProjects({ includeArchived: true }).filter((item) => matchesPeriod(item, period.month, period.range, ["startDate", "dueDate"])));
   return (
     <div className="stack">
-      <Hero kicker={username} title="Marketing dashboard" note="" badge={`${data.reports.length} reports`} tone="md" />
+      <div className="toolbar sales-head">
+        <p>Plans, reports, tasks, and issues follow {reportingLabel(period.month, period.range)}.</p>
+        <MonthField month={period.month} setMonth={period.setMonth} range={period.range} setRange={period.setRange} />
+      </div>
+      <Hero kicker={username} title="Marketing dashboard" note="" badge={`${reports.length} reports`} tone="md" />
       <section className="dash-metrics md-dash-metrics">
         <Metric tone={0} label="Info documents" value={String(data.clients.length)} />
-        <Metric tone={1} label="Content plans" value={String(data.plans.length)} />
-        <Metric tone={2} label="Reports" value={String(data.reports.length)} />
+        <Metric tone={1} label="Content plans" value={String(plans.length)} />
+        <Metric tone={2} label="Reports" value={String(reports.length)} />
         <Metric tone={3} label="Total tasks" value={String(side.tasks)} />
         <Metric tone={4} label="In progress" value={String(side.inProgress)} />
         <Metric tone={5} label="Issues" value={String(side.issues)} />
@@ -441,14 +457,19 @@ function Metric({ label, value, tone = 0 }) {
   );
 }
 
-function ceoPicture() {
+function ceoPicture(month, range) {
   const username = sessionAccount()?.username || "";
   const finance = loadFinance();
   const packages = loadPackages();
   const employees = loadHrms().employees;
-  const pmProjects = activeProjects(readAll("pm", "neon-crm-projects", "projects"));
-  const ownProjects = activeProjects(readOwn(username, "neon-crm-projects", "projects"));
-  const follows = readAll("sales", "neon-crm-sales", "followUps");
+  const pmProjects = activeProjects(readAll("pm", "neon-crm-projects", "projects")).filter((item) => matchesPeriod(item, month, range, ["startDate", "dueDate"]));
+  const ownProjects = activeProjects(readOwn(username, "neon-crm-projects", "projects")).filter((item) => matchesPeriod(item, month, range, ["startDate", "dueDate"]));
+  const follows = readAll("sales", "neon-crm-sales", "followUps").filter((item) => matchesPeriod(item, month, range, ["date"]));
+  const expenses = (finance.expenses || []).filter((item) => matchesPeriod(item, month, range, ["date"]));
+  const revenue = (finance.revenue || []).filter((item) => matchesPeriod(item, month, range, ["date"]));
+  const payments = (finance.payments || []).filter((item) => matchesPeriod(item, month, range, ["date"]));
+  const invoices = (finance.projectInvoices || []).filter((item) => matchesPeriod(item, month, range, ["date"]));
+  const periodFinance = { ...finance, expenses, revenue, payments, projectInvoices: invoices };
   const marketingDocs = accounts("marketing").map((user) => ({
     id: user.username,
     label: user.username,
@@ -456,13 +477,13 @@ function ceoPicture() {
     names: readOwn(user.username, "neon-crm-marketing", "clients").map((item) => item.brandName || item.legalName || "Info document"),
     color: "",
   }));
-  const monthRevenue = currentMonthRevenue(finance);
+  const monthRevenue = currentMonthRevenue(finance, month, range);
   const expenseRows = [
-    ...finance.expenses.map((item) => ({ category: item.category || "Expense", amount: item.amount, name: item.description || item.category })),
-    ...salaryExpenses(finance.payments).map((item) => ({ category: "Salary", amount: item.amount, name: item.description })),
+    ...expenses.map((item) => ({ category: item.category || "Expense", amount: item.amount, name: item.description || item.category })),
+    ...salaryExpenses(payments).map((item) => ({ category: "Salary", amount: item.amount, name: item.description })),
   ];
   return {
-    finance,
+    finance: periodFinance,
     monthRevenue: monthRevenue.total,
     revenueLabel: monthRevenue.label,
     packages,
@@ -475,10 +496,10 @@ function ceoPicture() {
     ownSlices: statusSlices(ownProjects),
     departmentSlices: peopleByDepartment(employees),
     financeSlices: [
-      namedSlice("payroll", "Payroll", finance.payments.length, "#873CFF", finance.payments.map(() => "Payroll record")),
-      namedSlice("expense", "Expenses", finance.expenses.length, "#68A8FF", finance.expenses.map((item) => item.description || item.category)),
-      namedSlice("revenue", "Revenue", finance.revenue.length, "#F103FA", finance.revenue.map((item) => item.description || item.salesPerson)),
-      namedSlice("projects", "Project payments", finance.projectInvoices.length, "#C412FC", finance.projectInvoices.map((item) => item.projectName || item.clientName)),
+      namedSlice("payroll", "Payroll", payments.length, "#873CFF", payments.map(() => "Payroll record")),
+      namedSlice("expense", "Expenses", expenses.length, "#68A8FF", expenses.map((item) => item.description || item.category)),
+      namedSlice("revenue", "Revenue", revenue.length, "#F103FA", revenue.map((item) => item.description || item.salesPerson)),
+      namedSlice("projects", "Project payments", invoices.length, "#C412FC", invoices.map((item) => item.projectName || item.clientName)),
     ],
     followSlices: followSlices(follows),
     marketingSlices: marketingDocs.length ? marketingDocs.map((item, index) => ({ ...item, color: PALETTE[index % PALETTE.length] })) : [namedSlice("none", "No marketing accounts", 0, "#64748b", [])],
@@ -488,20 +509,20 @@ function ceoPicture() {
   };
 }
 
-function ownPicture(username) {
-  const projects = activeProjects(readOwn(username, "neon-crm-projects", "projects"));
+function ownPicture(username, month, range) {
+  const projects = activeProjects(readOwn(username, "neon-crm-projects", "projects")).filter((item) => matchesPeriod(item, month, range, ["startDate", "dueDate"]));
   const clients = readOwn(username, "neon-crm-clients", "clients");
   const marketing = readAccount("neon-crm-marketing", username) || {};
   const docs = Array.isArray(marketing.clients) ? marketing.clients : [];
-  const plans = Array.isArray(marketing.plans) ? marketing.plans : [];
-  const reports = Array.isArray(marketing.reports) ? marketing.reports : [];
+  const plans = (Array.isArray(marketing.plans) ? marketing.plans : []).filter((item) => matchesPeriod(item, month, range, ["startDate", "endDate"]));
+  const reports = (Array.isArray(marketing.reports) ? marketing.reports : []).filter((item) => matchesPeriod(item, month, range, ["startDate", "endDate", "savedAt"]));
   const sales = loadCeoSales(username);
   const projectIds = new Set(projects.map((item) => item.id));
   const prefixedIds = new Set(projects.map((item) => `${username}:${item.id}`));
-  const quotes = (Array.isArray(sales.quotes) ? sales.quotes : []).filter((quote) => projectIds.has(quote.projectId) || prefixedIds.has(quote.projectId));
+  const quotes = (Array.isArray(sales.quotes) ? sales.quotes : []).filter((quote) => (projectIds.has(quote.projectId) || prefixedIds.has(quote.projectId)) && matchesPeriod(quote, month, range, ["date"]));
   const quoteIds = new Set(quotes.map((quote) => quote.id));
   const clientIds = new Set(clients.map((client) => client.id));
-  const payments = (Array.isArray(sales.payments) ? sales.payments : []).filter((payment) => quoteIds.has(payment.quoteId) || clientIds.has(payment.clientId));
+  const payments = (Array.isArray(sales.payments) ? sales.payments : []).filter((payment) => (quoteIds.has(payment.quoteId) || clientIds.has(payment.clientId)) && matchesPeriod(payment, month, range, ["date"]));
   const types = [
     ["software", "Software"],
     ["marketing", "Marketing"],
@@ -540,10 +561,10 @@ function projectTypeLabel(type) {
   return "Software";
 }
 
-function pmPicture() {
-  const projects = loadProjects().projects;
-  const tasks = loadTasks();
-  const issues = loadIssues();
+function pmPicture(month, range) {
+  const projects = loadProjects().projects.filter((item) => matchesPeriod(item, month, range, ["startDate", "dueDate"]));
+  const tasks = loadTasks().filter((item) => matchesPeriod(item, month, range, ["startDate", "dueDate", "completedAt"]));
+  const issues = loadIssues().filter((item) => matchesPeriod(item, month, range, ["reportedAt", "dueDate"]));
   const clients = loadClients();
   const reports = loadReports();
   return {
@@ -556,12 +577,10 @@ function pmPicture() {
     issueSlices: catalogSlices(ISSUE_PRIORITIES, issues, (item) => item.priority || "medium", (item) => item.title || "Issue", (id) => ISSUE_PRIORITY_COLOR[id]),
     clientSlices: counted(["active", "inactive"], clients, (item) => item.status || "active", (item) => item.name || "Client"),
     reportSlices: [
-      namedSlice("srs", "SRS documents", reports.srs.length, "#873CFF", reports.srs.map((item) => item.title || "SRS")),
-      namedSlice("proposals", "Proposals", reports.proposals.length, "#68A8FF", reports.proposals.map((item) => item.title || "Proposal")),
-      namedSlice("videos", "Demo videos", reports.videos.length, "#F103FA", reports.videos.map((item) => item.title || "Demo video")),
+      namedSlice("srs", "SRS documents", reports.srs.filter((item) => matchesPeriod(item, month, range, ["date"])).length, "#873CFF", reports.srs.filter((item) => matchesPeriod(item, month, range, ["date"])).map((item) => item.title || "SRS")),
+      namedSlice("proposals", "Proposals", reports.proposals.filter((item) => matchesPeriod(item, month, range, ["date", "startDate"])).length, "#68A8FF", reports.proposals.filter((item) => matchesPeriod(item, month, range, ["date", "startDate"])).map((item) => item.title || "Proposal")),
+      namedSlice("videos", "Demo videos", reports.videos.filter((item) => matchesPeriod(item, month, range, ["date"])).length, "#F103FA", reports.videos.filter((item) => matchesPeriod(item, month, range, ["date"])).map((item) => item.title || "Demo video")),
     ],
-    packageSlices: packageSlices(loadPackages()),
-    teamSlices: peopleByDepartment(loadHrms().employees),
   };
 }
 
@@ -642,7 +661,7 @@ function namedSlice(id, label, value, color, names) {
   return { id, label, value, color, names: names.filter(Boolean) };
 }
 
-function marketingSideCounts() {
+function marketingSideCounts(month, range) {
   const projects = marketingProjects();
   const cache = new Map();
   const tasks = [];
@@ -651,13 +670,15 @@ function marketingSideCounts() {
     for (const task of cache.get(project.owner) || []) {
       if (task.projectId !== project.id) continue;
       if (taskDepartment(task, project) !== "marketing") continue;
+      if (!matchesPeriod(task, month, range, ["startDate", "dueDate", "completedAt"])) continue;
       tasks.push(task);
     }
   }
+  const issues = loadIssues().filter((item) => matchesPeriod(item, month, range, ["reportedAt", "dueDate"]));
   return {
     tasks: tasks.length,
     inProgress: tasks.filter((task) => task.status === "in-progress").length,
-    issues: loadIssues().length,
+    issues: issues.length,
   };
 }
 
@@ -700,14 +721,10 @@ function labelize(id) {
   return words[id] || id;
 }
 
-function currentMonthRevenue(finance) {
-  const today = todayISO();
-  const month = today.slice(0, 7);
-  const inMonth = (date) => String(date || "").slice(0, 7) === month;
-  const sales = salesPaymentRevenue().filter((item) => inMonth(item.date)).reduce((sum, item) => sum + Number(item.amount || 0), 0);
-  const manual = (finance.revenue || []).filter((item) => inMonth(item.date)).reduce((sum, item) => sum + Number(item.amount || 0), 0);
-  const monthIndex = Number(today.slice(5, 7)) - 1;
-  return { total: sales + manual, label: `${MONTHS[monthIndex] || "Monthly"} revenue` };
+function currentMonthRevenue(finance, month, range) {
+  const sales = salesPaymentRevenue().filter((item) => inReportingPeriod(item.date, month, range)).reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  const manual = (finance.revenue || []).filter((item) => inReportingPeriod(item.date, month, range)).reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  return { total: sales + manual, label: `${reportingLabel(month, range)} revenue` };
 }
 
 function todayLabel() {
