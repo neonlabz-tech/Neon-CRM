@@ -1345,7 +1345,6 @@ export function inReportingPeriod(date, month, range) {
   return monthKey(value) === month;
 }
 
-export function confirmedRevenue(data, username, month) {
 export function matchesPeriod(record, month, range, keys = ["date"]) {
   const dates = keys
     .map((key) => String(record?.[key] || "").slice(0, 10))
@@ -1354,6 +1353,7 @@ export function matchesPeriod(record, month, range, keys = ["date"]) {
   return dates.some((value) => inReportingPeriod(value, month, range));
 }
 
+export function confirmedRevenue(data, username, month) {
   return data.payments
     .filter((payment) => payment.executive === username && payment.status === "confirmed" && monthKey(payment.date) === month)
     .reduce((sum, payment) => sum + payment.amount, 0);
@@ -1831,7 +1831,6 @@ export function saveLead(data, draft) {
   const status = mapLeadStatus(draft.status || existing?.status || "New");
   const phone = formatPhone(draft.phone);
   const digits = phoneDigits(phone);
-  if (digits.length && digits.length !== 10) {
   if (phoneError(phone)) return { ok: false, error: PHONE_ERROR };
   const samePhone = existing && phoneDigits(existing.phone) === digits;
   if (digits.length === 10 && !samePhone && leadPhoneTaken(phone, existing?.id || "")) {
@@ -1846,6 +1845,7 @@ export function saveLead(data, draft) {
     if (emailError(email, { required: true })) return { ok: false, error: EMAIL_ERROR };
   }
   if (emailError(email)) return { ok: false, error: EMAIL_ERROR };
+  const id = existing ? existing.id : claimLeadId(draft.id);
   if (!id) return { ok: false, error: "Lead ID is required." };
   let calls = Array.isArray(existing?.calls) ? existing.calls.map(normalizeCall).filter(Boolean) : [];
   if (draft.call) {

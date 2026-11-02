@@ -36,14 +36,14 @@ export function ClientsWorkspace({ personal = false } = {}) {
     const name = client.name.trim();
     if (!name) return "Company name is required.";
     if (!client.contactName.trim()) return "Client main person name is required.";
-    if (client.contactEmail.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(client.contactEmail.trim())) return "Enter a valid email address.";
+    if (emailError(client.contactEmail)) return EMAIL_ERROR;
+    if (phoneError(client.contactPhone)) return PHONE_ERROR;
     const subContacts = (client.subContacts || [])
       .map((person) => ({
         ...person,
         name: person.name.trim(),
         title: person.title.trim(),
         email: person.email.trim(),
-        phone: person.phone.trim(),
         phone: formatPhone(person.phone),
       }))
       .filter((person) => person.name || person.title || person.email || person.phone);
@@ -249,6 +249,7 @@ function ClientDialog({ client, onClose, onSave, salesPick = true }) {
           <label>
             Contact number
             <input value={draft.contactPhone} onChange={(event) => setField("contactPhone", formatPhone(event.target.value))} placeholder="077-123-4567" maxLength={16} />
+          </label>
           <label>
             Email address
             <input type="email" value={draft.contactEmail} onChange={(event) => setField("contactEmail", event.target.value)} />
@@ -281,8 +282,8 @@ function ClientDialog({ client, onClose, onSave, salesPick = true }) {
               </label>
               <label>
                 Phone number
-                <input value={person.phone} onChange={(event) => updateSubContact(person.id, "phone", event.target.value)} />
                 <input value={person.phone} onChange={(event) => updateSubContact(person.id, "phone", formatPhone(event.target.value))} placeholder="077-123-4567" maxLength={16} />
+              </label>
             </div>
           </section>
         ))}

@@ -662,14 +662,14 @@ function namedSlice(id, label, value, color, names) {
 }
 
 function marketingSideCounts(month, range) {
+  const projects = marketingProjects();
+  const cache = new Map();
+  const tasks = [];
+  for (const project of projects) {
+    if (!cache.has(project.owner)) cache.set(project.owner, tasksForOwner(project.owner));
+    for (const task of cache.get(project.owner) || []) {
       if (task.projectId !== project.id) continue;
       if (taskDepartment(task, project) !== "marketing") continue;
-      tasks.push(task);
-    }
-  }
-  return {
-    tasks: tasks.length,
-    inProgress: tasks.filter((task) => task.status === "in-progress").length,
       if (!matchesPeriod(task, month, range, ["startDate", "dueDate", "completedAt"])) continue;
       tasks.push(task);
     }
@@ -679,6 +679,12 @@ function marketingSideCounts(month, range) {
     tasks: tasks.length,
     inProgress: tasks.filter((task) => task.status === "in-progress").length,
     issues: issues.length,
+  };
+}
+
+function accounts(role) {
+  return loadUsers().filter((user) => user.active && (!role || user.role === role));
+}
 
 function readAll(role, base, key) {
   return accounts(role).flatMap((user) => readOwn(user.username, base, key));
@@ -715,13 +721,12 @@ function labelize(id) {
   return words[id] || id;
 }
 
-function currentMonthRevenue(finance) {
-  const today = todayISO();
-  const month = today.slice(0, 7);
-  const inMonth = (date) => String(date || "").slice(0, 7) === month;
-  const sales = salesPaymentRevenue().filter((item) => inMonth(item.date)).reduce((sum, item) => sum + Number(item.amount || 0), 0);
-  const manual = (finance.revenue || []).filter((item) => inMonth(item.date)).reduce((sum, item) => sum + Number(item.amount || 0), 0);
 function currentMonthRevenue(finance, month, range) {
   const sales = salesPaymentRevenue().filter((item) => inReportingPeriod(item.date, month, range)).reduce((sum, item) => sum + Number(item.amount || 0), 0);
   const manual = (finance.revenue || []).filter((item) => inReportingPeriod(item.date, month, range)).reduce((sum, item) => sum + Number(item.amount || 0), 0);
   return { total: sales + manual, label: `${reportingLabel(month, range)} revenue` };
+}
+
+function todayLabel() {
+  return new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "Asia/Colombo" }).format(new Date());
+}
