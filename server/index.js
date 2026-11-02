@@ -170,7 +170,7 @@ async function migrateUsers() {
   await User.updateMany({ password: { $exists: true } }, { $unset: { password: 1 } });
 }
 
-async function seedCeo() {
+export async function seedCeo() {
   await migrateUsers();
   const existing = await User.findOne({ username: "CEO001" });
   if (existing) return;
@@ -184,7 +184,7 @@ async function seedCeo() {
   console.log("Seeded CEO001. Sign in and set a new password of at least 8 characters.");
 }
 
-async function ensureCeoRecoveryEmail() {
+export async function ensureCeoRecoveryEmail() {
   const email = ceoRecoveryEmail();
   await User.updateOne(
     { username: "CEO001", $or: [{ email: { $exists: false } }, { email: null }, { email: "" }] },
