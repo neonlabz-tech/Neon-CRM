@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { minSelectableDate } from "./sales.js";
 import { createPortal } from "react-dom";
 import { BackButton } from "./BackButton.jsx";
 import { KanbanBoard } from "./Kanban.jsx";
@@ -436,12 +437,12 @@ function TaskDialog({ task, projects, employees, onClose, onSave }) {
           </label>
           <label>
             Start date
-            <input type="date" value={draft.startDate} onChange={(event) => setField("startDate", event.target.value)} />
+            <input type="date" min={minSelectableDate(draft.startDate)} value={draft.startDate} onChange={(event) => setField("startDate", event.target.value)} />
           </label>
           <label>
             Due date
             <span className="date-field">
-              <input type="date" value={draft.dueDate} onChange={(event) => setField("dueDate", event.target.value)} />
+              <input type="date" min={minSelectableDate(draft.dueDate)} value={draft.dueDate} onChange={(event) => setField("dueDate", event.target.value)} />
               {draft.dueDate ? (
                 <button className="icon-button danger" type="button" aria-label="Clear due date" title="Clear due date" onClick={() => setField("dueDate", "")}>
                   <DeleteIcon />

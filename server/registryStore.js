@@ -62,7 +62,7 @@ export function normalizeRegistry(raw) {
       if (key) next[book].ids[key] = true;
     });
     const numbers = Object.keys(next[book].ids).map((id) => codeNumber(BOOKS[book].prefix, id)).filter(Boolean);
-    next[book].sequence = Math.max(next[book].sequence, ...numbers, 0);
+    next[book].sequence = numbers.length ? Math.max(...numbers) : 0;
   }
   const phones = raw.phones && typeof raw.phones === "object" ? raw.phones : {};
   Object.entries(phones).forEach(([digits, id]) => {
@@ -81,21 +81,76 @@ export async function ensureRegistry() {
   );
 }
 
+async function highestSavedLeadNumber() {
+  const docs = await Store.find({ key: "neon-crm-sales" }).select("data.leads.id").lean();
+  let highest = 0;
+  for (const doc of docs) {
+    for (const lead of doc.data?.leads || []) {
+      highest = Math.max(highest, codeNumber("LEAD-", lead?.id));
+    }
+  }
+  return highest;
+}
+
+function keptLeadIds(savedHighest, ids) {
+  const keep = new Set();
+  Object.keys(ids || {}).forEach((id) => {
+    const number = codeNumber("LEAD-", id);
+    if (number > 0 && number <= savedHighest) keep.add(formatCode("LEAD-", 4, number));
+  });
+  for (let number = savedHighest + 1; ; number += 1) {
+    const id = formatCode("LEAD-", 4, number);
+    if (!ids?.[id]) break;
+    keep.add(id);
+  }
+  return keep;
+}
+
+async function dropPhantomLeadIds() {
+  const highest = await highestSavedLeadNumber();
+  const registry = await readRegistry();
+  const keep = keptLeadIds(highest, registry.leads.ids);
+  const unset = {};
+  Object.keys(registry.leads.ids).forEach((id) => {
+    if (!keep.has(id)) unset[`data.leads.ids.${id}`] = "";
+  });
+  const sequence = [...keep].reduce((max, id) => Math.max(max, codeNumber("LEAD-", id)), 0);
+  if (!Object.keys(unset).length) return { highest, sequence };
+  await Store.updateOne(
+    { key: REGISTRY_KEY, owner: COMPANY },
+    { $unset: unset, $set: { "data.leads.sequence": sequence } }
+  );
+  return { highest, sequence };
+}
+
 export async function unionRegistryIds(incoming) {
+  const savedLead = await highestSavedLeadNumber();
   const normalized = normalizeRegistry(incoming);
+  const registry = await readRegistry();
+  const leadIds = { ...registry.leads.ids, ...normalized.leads.ids };
+  const keepLeads = keptLeadIds(savedLead, leadIds);
   const set = {};
   const max = {};
+  const unset = {};
+  Object.keys(registry.leads.ids).forEach((id) => {
+    if (!keepLeads.has(id)) unset[`data.leads.ids.${id}`] = "";
+  });
   for (const book of Object.keys(BOOKS)) {
     Object.keys(normalized[book].ids).forEach((id) => {
+      if (book === "leads" && !keepLeads.has(id)) return;
       set[`data.${book}.ids.${id}`] = true;
     });
-    if (normalized[book].sequence) max[`data.${book}.sequence`] = normalized[book].sequence;
+    const sequence = book === "leads"
+      ? [...keepLeads].reduce((highest, id) => Math.max(highest, codeNumber("LEAD-", id)), 0)
+      : normalized[book].sequence;
+    if (sequence) max[`data.${book}.sequence`] = sequence;
   }
-  if (!Object.keys(set).length && !Object.keys(max).length) return;
+  if (!Object.keys(set).length && !Object.keys(max).length && !Object.keys(unset).length) return;
   await ensureRegistry();
   const update = {};
   if (Object.keys(set).length) update.$set = set;
   if (Object.keys(max).length) update.$max = max;
+  if (Object.keys(unset).length) update.$unset = unset;
   await Store.updateOne({ key: REGISTRY_KEY, owner: COMPANY }, update);
 }
 
@@ -116,10 +171,32 @@ async function reserveExact(book, code) {
   );
 }
 
+function highestNumber(book, ids) {
+  const spec = BOOKS[book];
+  let number = 0;
+  Object.keys(ids || {}).forEach((id) => {
+    number = Math.max(number, codeNumber(spec.prefix, id));
+  });
+  return number;
+}
+
+async function nextRegistryCode(book) {
+  const spec = BOOKS[book];
+  const registry = await readRegistry();
+  let number = highestNumber(book, registry[book].ids);
+  let code = "";
+  do {
+    number += 1;
+    code = formatCode(spec.prefix, spec.width, number);
+  } while (registry[book].ids[code]);
+  return code;
+}
+
 export async function claimRegistryCode(book, preferred = "", { exact = false } = {}) {
   const spec = BOOKS[book];
   if (!spec) throw new RegistryError("Unknown ID book.", 400);
   await ensureRegistry();
+  if (book === "leads") await dropPhantomLeadIds();
   const wanted = preferred ? safeKey(canonical(spec, preferred)) : "";
   if (exact) {
     if (!wanted) throw new RegistryError("ID is required.", 400);
@@ -127,19 +204,15 @@ export async function claimRegistryCode(book, preferred = "", { exact = false } 
     if (!reserved) throw new RegistryError("That ID is already used.", 409);
     return wanted;
   }
-  if (wanted) {
+  const registry = await readRegistry();
+  const wantedNumber = wanted ? codeNumber(spec.prefix, wanted) : 0;
+  const nextNumber = highestNumber(book, registry[book].ids) + 1;
+  if (wanted && wantedNumber && wantedNumber <= nextNumber && !registry[book].ids[wanted]) {
     const reserved = await reserveExact(book, wanted);
     if (reserved) return wanted;
   }
   for (let attempt = 0; attempt < 30; attempt += 1) {
-    const bumped = await Store.findOneAndUpdate(
-      { key: REGISTRY_KEY, owner: COMPANY },
-      { $inc: { [`data.${book}.sequence`]: 1 } },
-      { new: true }
-    );
-    const sequence = Number(bumped?.data?.[book]?.sequence) || 0;
-    if (!sequence) continue;
-    const code = formatCode(spec.prefix, spec.width, sequence);
+    const code = await nextRegistryCode(book);
     const reserved = await reserveExact(book, code);
     if (reserved) return code;
   }
@@ -183,6 +256,131 @@ export async function reserveLeadPhone(leadId, phone) {
     await Store.updateOne({ key: REGISTRY_KEY, owner: COMPANY }, { $unset: unset });
   }
   return true;
+}
+
+function leadPhoneKey(phone) {
+  let digits = String(phone || "").replace(/\D/g, "");
+  if (digits.startsWith("94") && digits.length > 10) digits = `0${digits.slice(2)}`;
+  if (digits.length === 9) digits = `0${digits}`;
+  return digits.slice(0, 10);
+}
+
+function leadIdentity(lead) {
+  const phone = leadPhoneKey(lead?.phone);
+  if (phone.length === 10) return phone;
+  const name = String(lead?.business || lead?.name || "").trim().toLowerCase();
+  return name ? `name:${name}` : "";
+}
+
+export function restoreClonedLeads(incoming, stored) {
+  const incomingLeads = Array.isArray(incoming?.leads) ? incoming.leads : [];
+  const counts = new Map();
+  incomingLeads.forEach((lead) => {
+    const key = leadPhoneKey(lead?.phone);
+    if (key.length !== 10) return;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  });
+  const cloned = new Set([...counts.entries()].filter(([, count]) => count > 1).map(([key]) => key));
+  if (!cloned.size) return incoming;
+  const storedLeads = Array.isArray(stored?.leads) ? stored.leads : [];
+  const seen = new Set();
+  const leads = [];
+  storedLeads.forEach((lead) => {
+    const key = leadIdentity(lead);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    const storedName = String(lead?.business || lead?.name || "").trim().toLowerCase();
+    const edited = incomingLeads.find((item) => {
+      const samePhone = leadPhoneKey(item?.phone) === leadPhoneKey(lead?.phone);
+      const sameName = String(item?.business || item?.name || "").trim().toLowerCase() === storedName;
+      return samePhone && sameName && storedName;
+    });
+    if (!edited) {
+      leads.push(lead);
+      return;
+    }
+    leads.push({
+      ...lead,
+      status: edited.status || lead.status,
+      next: edited.next || lead.next,
+      notes: edited.notes || lead.notes,
+      calls: Array.isArray(edited.calls) && edited.calls.length ? edited.calls : (lead.calls || []),
+    });
+  });
+  cloned.forEach((phone) => {
+    if (seen.has(phone)) return;
+    const group = incomingLeads.filter((lead) => leadPhoneKey(lead?.phone) === phone);
+    const best = group.find((lead) => Array.isArray(lead.calls) && lead.calls.length) || group[0];
+    if (!best) return;
+    seen.add(phone);
+    leads.push(best);
+  });
+  incomingLeads.forEach((lead) => {
+    const phone = leadPhoneKey(lead?.phone);
+    if (cloned.has(phone)) return;
+    const key = leadIdentity(lead);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    leads.push(lead);
+  });
+  return { ...incoming, leads, followUps: Array.isArray(stored?.followUps) ? stored.followUps : incoming.followUps };
+}
+
+export function assignUniqueLeadIds(data, floor = 0) {
+  if (!data || !Array.isArray(data.leads)) return data;
+  const seen = new Set();
+  let max = Number(floor) || 0;
+  const leads = data.leads.map((lead) => {
+    const number = codeNumber("LEAD-", lead?.id);
+    const id = number ? formatCode("LEAD-", 4, number) : "";
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      max = Math.max(max, number);
+      return String(lead.id) === id ? lead : { ...lead, id };
+    }
+    max += 1;
+    while (seen.has(formatCode("LEAD-", 4, max))) max += 1;
+    const next = formatCode("LEAD-", 4, max);
+    seen.add(next);
+    return { ...lead, id: next };
+  });
+  const byPhone = new Map();
+  const byName = new Map();
+  leads.forEach((lead) => {
+    const digits = phoneDigits(lead.phone);
+    const name = String(lead.business || lead.name || "").trim().toLowerCase();
+    if (digits.length === 10) byPhone.set(digits, lead.id);
+    if (name) byName.set(name, lead.id);
+  });
+  const followUps = Array.isArray(data.followUps)
+    ? data.followUps.map((item) => {
+      const digits = phoneDigits(item?.phone);
+      const name = String(item?.name || "").trim().toLowerCase();
+      const id = (digits.length === 10 && byPhone.get(digits)) || byName.get(name) || item?.id;
+      return id && id !== item?.id ? { ...item, id } : item;
+    })
+    : data.followUps;
+  return { ...data, leads, followUps };
+}
+
+export async function syncSavedLeadIds(leads) {
+  const set = {};
+  let sequence = 0;
+  (leads || []).forEach((lead) => {
+    const number = codeNumber("LEAD-", lead?.id);
+    if (!number) return;
+    const id = formatCode("LEAD-", 4, number);
+    set[`data.leads.ids.${id}`] = true;
+    sequence = Math.max(sequence, number);
+    const digits = phoneDigits(lead.phone);
+    if (digits.length === 10) set[`data.phones.${digits}`] = id;
+  });
+  if (!Object.keys(set).length) return;
+  await ensureRegistry();
+  await Store.updateOne(
+    { key: REGISTRY_KEY, owner: COMPANY },
+    { $set: set, $max: { "data.leads.sequence": sequence } }
+  );
 }
 
 export async function releaseLeadPhone(leadId) {

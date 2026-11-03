@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { minSelectableDate } from "./sales.js";
 import { createPortal } from "react-dom";
 import { BackButton } from "./BackButton.jsx";
 import { LetterheadDialog } from "./Letterhead.jsx";
@@ -29,12 +30,12 @@ import {
   saveMarketing,
   weekday,
 } from "./marketing.js";
-import { isVisibleToMarketing, marketingFieldsFromPm, marketingServiceClients, publishClients, pushMarketingToPm } from "./clientSync.js";
+import { marketingFieldsFromPm, marketingServiceClients, publishClients, pushMarketingToPm, visibleMarketingClients } from "./clientSync.js";
 import { notifyUser } from "./finance.js";
 import { EMAIL_ERROR, PHONE_ERROR, emailError, formatPhone, phoneError, teamMembersFor } from "./hrms.js";
 import { KanbanBoard } from "./Kanban.jsx";
 import { claimProjectCode } from "./registry.js";
-import { assignMarketingTeam, blankMilestone, canonicalProjectCode, canManageDepartment, companyProjectCodes, deleteMarketingMilestone, marketingProjects, milestoneDepartment, milestoneTasksComplete, normalizeAssignees, projectCodeTaken, removeMarketingProjectFromDoc, saveMarketingMilestone, saveMarketingProjectDates, suggestCompanyProjectCode, syncOwnerProjectProgress, todayIso, upsertMarketingProjectFromDoc } from "./projects.js";
+import { assignMarketingTeam, blankMilestone, canonicalProjectCode, canManageDepartment, companyProjectCodes, deleteMarketingMilestone, linkedProjectForClient, marketingProjects, milestoneDepartment, milestoneTasksComplete, normalizeAssignees, projectCodeTaken, removeMarketingProjectFromDoc, saveMarketingMilestone, saveMarketingProjectDates, suggestCompanyProjectCode, syncOwnerProjectProgress, todayIso, upsertMarketingProjectFromDoc } from "./projects.js";
 import { ProjectPackagesBoard } from "./Sales.jsx";
 import { BOARD_COLUMNS, TASK_PRIORITIES, TASK_STATUSES, blankTask, cleanHtml, employeeLaneStatus, managerBoardColumns, nextTaskCode, saveOwnerTasks, stampTaskStatus, tasksForOwner } from "./tasks.js";
 import { sessionAccount } from "./scope.js";
@@ -777,11 +778,11 @@ function MilestoneBoard({ projects, people, canEdit, focus, onRevision }) {
               <div className="field-grid">
                 <label>
                   Start date
-                  <input type="date" value={editing.startDate} onChange={(event) => setEditing({ ...editing, startDate: event.target.value })} />
+                  <input type="date" min={minSelectableDate(editing.startDate)} value={editing.startDate} onChange={(event) => setEditing({ ...editing, startDate: event.target.value })} />
                 </label>
                 <label>
                   Due date
-                  <input type="date" value={editing.dueDate} onChange={(event) => setEditing({ ...editing, dueDate: event.target.value })} required />
+                  <input type="date" min={minSelectableDate(editing.dueDate)} value={editing.dueDate} onChange={(event) => setEditing({ ...editing, dueDate: event.target.value })} required />
                 </label>
               </div>
               <section className="block">
@@ -1087,7 +1088,7 @@ function MarketingTaskDialog({ task, project, milestone, people, onClose, onSave
           </label>
           <label>
             Due date
-            <input type="date" value={draft.dueDate || ""} onChange={(event) => setDraft({ ...draft, dueDate: event.target.value })} />
+            <input type="date" min={minSelectableDate(draft.dueDate)} value={draft.dueDate || ""} onChange={(event) => setDraft({ ...draft, dueDate: event.target.value })} />
           </label>
         </div>
         {error ? <p className="form-error">{error}</p> : null}
@@ -1131,11 +1132,11 @@ function DueDateDialog({ project, error, onClose, onSave }) {
         <div className="field-grid">
           <label>
             Start date
-            <input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
+            <input type="date" min={minSelectableDate(startDate)} value={startDate} onChange={(event) => setStartDate(event.target.value)} />
           </label>
           <label>
             Due date
-            <input type="date" value={dueDate} onChange={(event) => setDueDate(event.target.value)} required />
+            <input type="date" min={minSelectableDate(dueDate)} value={dueDate} onChange={(event) => setDueDate(event.target.value)} required />
           </label>
         </div>
         {error ? <p className="form-error">{error}</p> : null}
@@ -1183,15 +1184,16 @@ function InfoDocs({ data, commit, canEdit }) {
   const [editing, setEditing] = useState(null);
   const [viewing, setViewing] = useState(null);
   const [removing, setRemoving] = useState(null);
-  const visibleClients = data.clients.filter(isVisibleToMarketing);
+  const visibleClients = visibleMarketingClients(data.clients);
 
   function save(client) {
-    const typedId = client.projectId.trim();
+    const shared = linkedProjectForClient(client.brandName);
+    const typedId = (shared?.code || client.projectId).trim();
     const projectId = canonicalProjectCode(typedId) || typedId;
     if (!projectId || !client.brandName.trim() || !client.mainContactName.trim()) {
       return "Project ID, brand name, and main contact name are required.";
     }
-    if (projectCodeTaken(projectId, { exceptMarketingId: client.id, clientName: client.brandName })) {
+    if (!shared && projectCodeTaken(projectId, { exceptMarketingId: client.id, clientName: client.brandName })) {
       return "That project ID is already used.";
     }
     const previousId = data.clients.find((item) => item.id === client.id)?.projectId || "";
@@ -1200,7 +1202,7 @@ function InfoDocs({ data, commit, canEdit }) {
       const value = (canonicalProjectCode(item) || String(item || "").trim()).toLowerCase();
       return value === projectId.toLowerCase();
     });
-    if (!sameId && !linked && !claimProjectCode(projectId, { exact: true })) {
+    if (!shared && !sameId && !linked && !claimProjectCode(projectId, { exact: true })) {
       return "That project ID is already used.";
     }
     const next = { ...client, projectId };
@@ -1336,7 +1338,7 @@ function InfoDocEditor({ client, onCancel, onSave }) {
       {error ? <p className="form-error">{error}</p> : null}
       <section className="block">
         <h2>Main details</h2>
-        <Field label="Project ID" value={draft.projectId} onChange={(value) => setField("projectId", value)} required />
+        <Field label="Project ID" value={draft.projectId} onChange={(value) => setField("projectId", value)} required readOnly />
       </section>
       <section className="block">
         <h2>A. Client details</h2>
@@ -1348,14 +1350,15 @@ function InfoDocEditor({ client, onCancel, onSave }) {
               const details = choices.find((item) => item.name === event.target.value);
               if (!details) return;
               const fetched = marketingFieldsFromPm(details);
+              const linked = linkedProjectForClient(details.name);
               setDraft((current) => ({
                 ...current,
                 ...Object.fromEntries(Object.entries(fetched).filter(([, value]) => value)),
-                projectId: fetched.projectId || current.projectId,
+                projectId: canonicalProjectCode(linked?.code) || linked?.code || fetched.projectId || current.projectId,
               }));
             }}
           >
-            <option value="">{choices.length ? "Select a marketing client" : "No marketing or both-service clients yet"}</option>
+            <option value="">{choices.length ? "Select a marketing client" : "No marketing client has started a payment yet"}</option>
             {choices.map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}
           </select>
         </label>
@@ -1480,19 +1483,19 @@ function ContentPlans({ data, commit, canEdit }) {
     return "";
   }
 
-  if (editing) return <PlanEditor plan={editing} clients={data.clients.filter(isVisibleToMarketing)} onCancel={() => setEditing(null)} onSave={save} />;
+  if (editing) return <PlanEditor plan={editing} clients={visibleMarketingClients(data.clients)} onCancel={() => setEditing(null)} onSave={save} />;
 
   return (
     <div className="stack">
       <div className="toolbar">
         <p>Monthly calendars with organic posts and one paid ad campaign for each month.</p>
         {canEdit ? (
-          <button className="primary" type="button" onClick={() => setEditing(blankPlan())} disabled={data.clients.filter(isVisibleToMarketing).length === 0}>
+          <button className="primary" type="button" onClick={() => setEditing(blankPlan())} disabled={visibleMarketingClients(data.clients).length === 0}>
             Add content plan
           </button>
         ) : null}
       </div>
-      {data.clients.filter(isVisibleToMarketing).length === 0 ? <p className="banner">Add a client in Info Doc before creating a content plan.</p> : null}
+      {visibleMarketingClients(data.clients).length === 0 ? <p className="banner">Add a client in Info Doc before creating a content plan.</p> : null}
       <article className="panel">
         {data.plans.length === 0 ? (
           <p className="empty-copy">No content plans yet.</p>
@@ -1815,7 +1818,7 @@ function Reports({ data, commit, canEdit }) {
         <ReportDialog
           report={dialog.report}
           mode={dialog.mode}
-          clients={data.clients.filter(isVisibleToMarketing)}
+          clients={visibleMarketingClients(data.clients)}
           onClose={() => setDialog(null)}
           onSave={save}
         />
@@ -2005,7 +2008,7 @@ function ReportDialog({ report, mode, clients, onClose, onSave }) {
   );
 }
 
-function Field({ label, value, onChange, type = "text", className, required = false }) {
+function Field({ label, value, onChange, type = "text", className, required = false, readOnly = false }) {
   if (type === "area") {
     return (
       <label className={className}>
@@ -2017,7 +2020,7 @@ function Field({ label, value, onChange, type = "text", className, required = fa
   return (
     <label className={className}>
       {label}
-      <input type={type} value={value} onChange={(event) => onChange(event.target.value)} required={required} />
+      <input type={type} value={value} onChange={(event) => onChange(event.target.value)} required={required} readOnly={readOnly} />
     </label>
   );
 }

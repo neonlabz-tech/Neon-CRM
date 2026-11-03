@@ -87,6 +87,7 @@ function canvasPages(canvas) {
   let top = 0;
   while (top < canvas.height) {
     const height = Math.min(pageHeight, canvas.height - top);
+    if (pages.length && height < pageHeight * 0.04) break;
     const slice = document.createElement("canvas");
     slice.width = canvas.width;
     slice.height = height;
@@ -144,8 +145,9 @@ export async function downloadDocumentPdf(name, html) {
     const sheet = doc.querySelector(".sheet") || doc.body;
     sheet.style.margin = "0";
     sheet.style.boxShadow = "none";
+    sheet.style.minHeight = "0";
     const width = Math.max(sheet.scrollWidth, sheet.offsetWidth, 794);
-    const height = Math.max(sheet.scrollHeight, sheet.offsetHeight, 1123);
+    const height = Math.max(sheet.scrollHeight, sheet.offsetHeight);
     frame.style.height = `${height}px`;
     const { default: html2canvas } = await import("html2canvas");
     const canvas = await html2canvas(sheet, {
@@ -166,6 +168,7 @@ export async function downloadDocumentPdf(name, html) {
         const copy = clone.querySelector(".sheet") || clone.body;
         copy.style.margin = "0";
         copy.style.boxShadow = "none";
+        copy.style.minHeight = "0";
       },
     });
     saveBlob(title, jpegToPdfBlob(canvasPages(canvas)));

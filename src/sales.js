@@ -27,7 +27,7 @@ export const SERVICES = [
 export const PRICE_BASIS = ["Per project", "Per month", "3 months"];
 
 export const LEAD_STAGES = ["New", "Connected", "Interested", "Quotation Sent", "Demo Scheduled", "Payment Promised", "Follow-up", "Converted", "Lost"];
-export const LEAD_SOURCES = ["Google Maps", "Facebook", "Instagram", "Referral", "Website", "Other"];
+export const LEAD_SOURCES = ["Google Maps", "Facebook", "Instagram", "TikTok", "Referral", "Website", "Other"];
 export const LEAD_SERVICES = ["Software development", "Marketing", "Both"];
 
 export function leadServiceOptions(current) {
@@ -127,6 +127,19 @@ export function todayISO() {
   }).format(new Date());
 }
 
+export function minSelectableDate(existing = "") {
+  const today = todayISO();
+  const kept = String(existing || "").slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(kept) && kept < today) return kept;
+  return today;
+}
+
+export function dateIsAllowed(value, existing = "") {
+  const day = String(value || "").slice(0, 10);
+  if (!day) return true;
+  return day >= minSelectableDate(existing);
+}
+
 const MISSION_RESET_HOUR = 8;
 const COLOMBO_OFFSET = "+05:30";
 
@@ -217,6 +230,22 @@ export function formatQuoteDate(iso) {
   const date = new Date(`${iso}T12:00:00`);
   if (Number.isNaN(date.getTime())) return String(iso);
   return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(date);
+}
+
+export function discountPercentOf(quote) {
+  const stored = Number(quote?.discountPercent);
+  if (Number.isFinite(stored) && stored >= 0) return Math.round(stored * 10) / 10;
+  const price = Number(quote?.price) || 0;
+  const discount = Number(quote?.discount) || 0;
+  if (price <= 0 || discount <= 0) return 0;
+  return Math.round((discount / price) * 1000) / 10;
+}
+
+export function moneyFromPercent(subtotal, percent) {
+  const price = Math.round((Number(subtotal) || 0) * 100) / 100;
+  const rate = Number(percent);
+  if (!Number.isFinite(rate) || rate <= 0 || price <= 0) return 0;
+  return Math.round(price * Math.min(rate, 100) / 100 * 100) / 100;
 }
 
 export function formatDiscountPercent(percent) {
@@ -406,8 +435,8 @@ function normalizeSales(raw) {
     goals: {
       monthly: dropDummy(numberOr(raw.goals?.monthly, 0), DUMMY_GOALS.monthly, 0),
       projects: dropDummy(numberOr(raw.goals?.projects, 0), DUMMY_GOALS.projects, 0),
-      daily: dropDummy(numberOr(raw.goals?.daily, 0), DUMMY_GOALS.daily, 0),
-      leadTarget: dropDummy(numberOr(raw.goals?.leadTarget, 0), DUMMY_GOALS.leadTarget, 0),
+      daily: numberOr(raw.goals?.daily, 0),
+      leadTarget: numberOr(raw.goals?.leadTarget, 0),
     },
     campaign: {
       name: dropDummy(String(raw.campaign?.name || ""), DUMMY_CAMPAIGN.name, ""),
@@ -493,6 +522,7 @@ function normalizeQuote(item) {
     period: periods.length === 1 ? periods[0] : periods.length ? "Mixed" : String(item.period || ""),
     price: figures.subtotal,
     discount: figures.discount,
+    ...(Number.isFinite(Number(item.discountPercent)) ? { discountPercent: Number(item.discountPercent) } : {}),
     total: figures.grand,
     scope: items.map((line) => `${line.packageName}\n${line.scope}`).join("\n\n"),
     terms: String(item.terms || ""),
@@ -609,12 +639,14 @@ function mapLeadStatus(value) {
 
 function normalizeCall(item) {
   if (!item) return null;
+  const createdAt = String(item.createdAt || "");
   return {
     date: String(item.date || ""),
     outcome: CALL_OUTCOMES.includes(item.outcome) ? item.outcome : "Answered",
     status: mapLeadStatus(item.status),
     next: String(item.next || ""),
     note: String(item.note || ""),
+    createdAt: Number.isNaN(new Date(createdAt).getTime()) ? "" : createdAt,
   };
 }
 
@@ -718,6 +750,7 @@ function directoryLead(lead, owner) {
     address: lead.address || "",
     phone: lead.phone || "",
     email: lead.email || "",
+    service: lead.service || "",
     status: lead.status || "",
     owner,
     date: lead.date || "",
@@ -736,13 +769,11 @@ function directoryLeads() {
 
 function publishLeadDirectory() {
   const harvested = harvestLeadIndex();
-  const stored = loadLeadIndex();
-  const ids = { ...stored.ids, ...harvested.ids };
-  Object.keys(ids).forEach((id) => noteLeadId(id));
+  Object.keys(harvested.ids).forEach((id) => noteLeadId(id));
   syncLeadPhones(harvested.phones);
   saveLeadIndex({
-    sequence: Math.max(harvested.sequence, stored.sequence),
-    ids,
+    sequence: harvested.sequence,
+    ids: harvested.ids,
     leads: directoryLeads(),
   });
 }
@@ -763,19 +794,6 @@ function harvestLeadIndex() {
   return { sequence, ids, phones };
 }
 
-function loadLeadIndex() {
-  try {
-    const raw = JSON.parse(crmStorage.getItem(LEAD_INDEX_KEY) || "null");
-    if (!raw || typeof raw !== "object") return { sequence: 0, ids: {} };
-    return {
-      sequence: Number(raw.sequence) || 0,
-      ids: raw.ids && typeof raw.ids === "object" ? raw.ids : {},
-    };
-  } catch {
-    return { sequence: 0, ids: {} };
-  }
-}
-
 function saveLeadIndex(index) {
   crmStorage.setItem(LEAD_INDEX_KEY, JSON.stringify({
     sequence: index.sequence,
@@ -786,25 +804,42 @@ function saveLeadIndex(index) {
 
 function claimLeadId(preferred) {
   const harvested = harvestLeadIndex();
-  const stored = loadLeadIndex();
-  Object.keys({ ...stored.ids, ...harvested.ids }).forEach((id) => noteLeadId(id));
+  Object.keys(harvested.ids).forEach((id) => noteLeadId(id));
   syncLeadPhones(harvested.phones);
   const wanted = String(preferred || "").trim();
-  const free = wanted && !harvested.ids[wanted] && !stored.ids[wanted] && !leadIdTaken(wanted);
+  const free = wanted && !harvested.ids[wanted] && !leadIdTaken(wanted);
   const id = reserveLeadId(free ? wanted : "");
   saveLeadIndex({
-    sequence: Math.max(harvested.sequence, stored.sequence, leadIdNumber(id)),
-    ids: { ...stored.ids, ...harvested.ids, [id]: true },
+    sequence: Math.max(harvested.sequence, leadIdNumber(id)),
+    ids: { ...harvested.ids, ...(id ? { [id]: true } : {}) },
+    leads: directoryLeads(),
   });
   return id;
 }
 
 export function nextLeadId() {
   const harvested = harvestLeadIndex();
-  const stored = loadLeadIndex();
-  Object.keys({ ...stored.ids, ...harvested.ids }).forEach((id) => noteLeadId(id));
+  Object.keys(harvested.ids).forEach((id) => noteLeadId(id));
   syncLeadPhones(harvested.phones);
   return suggestLeadId();
+}
+
+export function reserveNextLeadId() {
+  return claimLeadId("") || nextLeadId();
+}
+
+function allocateLeadId(data) {
+  const used = new Set((data?.leads || []).map((lead) => lead?.id).filter(Boolean));
+  let id = claimLeadId("");
+  if (id && !used.has(id)) return id;
+  let number = Math.max(0, harvestLeadIndex().sequence);
+  used.forEach((item) => { number = Math.max(number, leadIdNumber(item)); });
+  do {
+    number += 1;
+    id = formatLeadId(number);
+  } while (used.has(id) || leadIdTaken(id));
+  noteLeadId(id);
+  return id;
 }
 
 export function leadPhoneTaken(phone, exceptId = "") {
@@ -1163,6 +1198,59 @@ function addPayingClient(byName, next) {
   });
 }
 
+function mapPayingClient(item) {
+  return {
+    name: String(item?.name || "").trim(),
+    code: String(item?.code || "").trim(),
+    email: String(item?.email || "").trim(),
+    phone: String(item?.phone || "").trim(),
+    address: String(item?.address || "").trim(),
+    service: String(item?.service || "").trim(),
+  };
+}
+
+function startedRowsFromSales() {
+  const byName = new Map();
+  loadUsers()
+    .filter((item) => item.active && item.role === "sales")
+    .forEach((salesUser) => {
+      const sales = readSalesAccount(salesUser.username);
+      (sales?.payments || []).forEach((payment) => {
+        if (!payment || payment.status === "cancelled") return;
+        const quote = (sales?.quotes || []).find((item) => item.id === payment.quoteId);
+        const name = String(payment.clientName || quote?.client || "").trim();
+        if (!name) return;
+        const key = name.toLowerCase();
+        const lead = (sales?.leads || []).find((item) => item.id === payment.clientId || item.id === quote?.clientId)
+          || (sales?.leads || []).find((item) => String(item.business || "").trim().toLowerCase() === key);
+        const current = byName.get(key) || { name };
+        byName.set(key, {
+          name,
+          code: current.code || lead?.clientCode || quote?.clientCode || payment.clientCode || "",
+          email: current.email || lead?.email || quote?.email || "",
+          phone: current.phone || lead?.phone || quote?.phone || "",
+          address: current.address || lead?.address || quote?.address || "",
+          service: current.service || lead?.service || "",
+        });
+      });
+    });
+  return [...byName.values()];
+}
+
+export function startedPaymentClients() {
+  const shared = sharedPayingClients().map(mapPayingClient).filter((item) => item.name);
+  if (sessionAccount()?.role !== "ceo") {
+    return shared.sort((a, b) => a.name.localeCompare(b.name));
+  }
+  const byName = new Map(shared.map((item) => [item.name.toLowerCase(), item]));
+  startedRowsFromSales().forEach((item) => {
+    const key = item.name.toLowerCase();
+    const current = byName.get(key) || {};
+    byName.set(key, { ...current, ...item, service: item.service || current.service || "" });
+  });
+  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
 export function payingClientsForPm(username) {
   const user = loadUsers().find((item) => item.active && item.username === username);
   if (!user || user.role !== "pm") return [];
@@ -1175,8 +1263,6 @@ export function payingClientsForPm(username) {
       const sales = readSalesAccount(salesUser.username);
       (sales?.payments || []).forEach((payment) => {
         if (!payment || payment.status === "cancelled") return;
-        const approved = payment.approval === "approved" || (payment.status === "confirmed" && payment.approval !== "pending");
-        if (!approved) return;
         sawSalesPayment = true;
         const quote = (sales?.quotes || []).find((item) => item.id === payment.quoteId);
         const name = String(payment.clientName || quote?.client || "").trim();
@@ -1397,16 +1483,22 @@ function quoteFromDraft(data, draft) {
   const converted = (data.leads || []).find((lead) => lead.id === draft.clientId && lead.status === "Converted");
   const salesQuote = Boolean(converted);
   const client = String(salesQuote ? converted.business : draft.client || "").trim();
-  const discount = Number(draft.discount);
+  const discountPercent = Number(draft.discount);
   if (!salesQuote && (!draft.projectId || !client)) return { ok: false, error: "Choose a project." };
   if (salesQuote && !client) return { ok: false, error: "Choose a converted client." };
   if (!draft.date) return { ok: false, error: "Quotation date is required." };
+  const previousQuote = (data.quotes || []).find((item) => item.id && item.id === draft.id);
+  if (!dateIsAllowed(draft.date, previousQuote?.date || "")) {
+    return { ok: false, error: "Quotation date cannot be before today." };
+  }
   const valid = draft.valid || (salesQuote ? addDays(draft.date, 14) : "");
+  if (valid && !dateIsAllowed(valid, previousQuote?.valid || "")) {
+    return { ok: false, error: "Validity date cannot be before today." };
+  }
   if (!salesQuote && !valid) return { ok: false, error: "Quotation date and validity are required." };
   if (valid && valid < draft.date) return { ok: false, error: "Validity date cannot be before the quotation date." };
   if (emailError(draft.email)) return { ok: false, error: EMAIL_ERROR };
   if (phoneError(draft.phone)) return { ok: false, error: PHONE_ERROR };
-  if (valid && valid < draft.date) return { ok: false, error: "Validity date cannot be before the quotation date." };
   const lines = Array.isArray(draft.lines) ? draft.lines : [];
   if (!lines.length) return { ok: false, error: "Add at least one package." };
   const items = [];
@@ -1429,18 +1521,20 @@ function quoteFromDraft(data, draft) {
     });
   }
   const subtotal = Math.round(items.reduce((sum, line) => sum + line.price, 0) * 100) / 100;
-  if (!Number.isFinite(discount) || discount < 0 || discount >= subtotal) {
-    return { ok: false, error: "Discount must be less than the quotation value." };
+  if (!Number.isFinite(discountPercent) || discountPercent < 0 || discountPercent > 100) {
+    return { ok: false, error: "Offer must be a percentage from 0 to 100." };
   }
+  const discount = moneyFromPercent(subtotal, discountPercent);
   const figures = salesQuote
     ? {
       subtotal,
-      discount: Number.isFinite(discount) && discount > 0 ? discount : 0,
-      net: Math.max(0, subtotal - (Number.isFinite(discount) && discount > 0 ? discount : 0)),
+      discount,
+      net: Math.max(0, Math.round((subtotal - discount) * 100) / 100),
       vat: 0,
-      grand: Math.round(Math.max(0, subtotal - (Number.isFinite(discount) && discount > 0 ? discount : 0)) * 100) / 100,
+      grand: Math.max(0, Math.round((subtotal - discount) * 100) / 100),
+      percent: discountPercent,
     }
-    : quotationFigures(subtotal, discount);
+    : { ...quotationFigures(subtotal, discount), percent: discountPercent };
   const terms = String(draft.terms || "").trim() || (salesQuote ? "As agreed with the client." : "");
   if (!terms) return { ok: false, error: "Payment terms are required." };
   const periods = [...new Set(items.map((line) => line.period))];
@@ -1467,6 +1561,7 @@ function quoteFromDraft(data, draft) {
       period: periods.length === 1 ? periods[0] : "Mixed",
       price: figures.subtotal,
       discount: figures.discount,
+      discountPercent,
       total: figures.grand,
       scope: items.map((line) => `${line.packageName}\n${line.scope}`).join("\n\n"),
       terms,
@@ -1777,6 +1872,39 @@ function csvValue(row, map, field, fallback) {
   return index === undefined ? "" : row[index] || "";
 }
 
+function importedPhone(value) {
+  let digits = String(value || "").replace(/\D/g, "");
+  if (digits.startsWith("94") && digits.length > 10) digits = `0${digits.slice(2)}`;
+  if (digits.length === 9) digits = `0${digits}`;
+  return formatPhone(digits.slice(0, 10));
+}
+
+function importedService(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return "";
+  if (text.startsWith("soft")) return "Software development";
+  if (text.startsWith("market")) return "Marketing";
+  if (text.includes("both")) return "Both";
+  return LEAD_SERVICES.find((item) => item.toLowerCase() === text) || String(value || "").trim();
+}
+
+function importedSource(value) {
+  const text = String(value || "").trim().toLowerCase();
+  return LEAD_SOURCES.find((item) => item.toLowerCase() === text.replace(/\s+/g, "")) 
+    || LEAD_SOURCES.find((item) => item.toLowerCase() === text)
+    || (text ? "Other" : "Other");
+}
+
+function importedExtras(headers, row, map) {
+  const used = new Set(Object.values(map || {}));
+  return headers.flatMap((header, index) => {
+    if (used.has(index)) return [];
+    const label = String(header || "").trim();
+    const value = String(row[index] || "").trim();
+    return label && value ? [`${label}: ${value}`] : [];
+  }).join("\n");
+}
+
 export function importLeadsFromCsv(data, text, options = {}) {
   const rows = parseCsv(text);
   if (!rows.length) return { ok: false, error: "The CSV file has no lead rows." };
@@ -1786,6 +1914,7 @@ export function importLeadsFromCsv(data, text, options = {}) {
   let current = data;
   let imported = 0;
   const skipped = [];
+  const headers = map ? rows[0] : [];
   body.forEach((row, index) => {
     const line = (map ? index + 2 : index + 1);
     const business = String(csvValue(row, map, "business", 0)).trim();
@@ -1793,22 +1922,42 @@ export function importLeadsFromCsv(data, text, options = {}) {
       skipped.push(`Row ${line} has no customer name.`);
       return;
     }
+    const phone = importedPhone(csvValue(row, map, "phone", 1));
+    const duplicate = (current.leads || []).some((lead) => {
+      const sameName = String(lead.business || "").trim().toLowerCase() === business.toLowerCase();
+      const samePhone = phoneDigits(phone).length === 10 && phoneDigits(lead.phone) === phoneDigits(phone);
+      return sameName || samePhone;
+    });
+    if (duplicate || (phoneDigits(phone).length === 10 && leadPhoneTaken(phone))) {
+      skipped.push(`Row ${line} matches an existing lead.`);
+      return;
+    }
+    const notes = [csvValue(row, map, "notes", 9), importedExtras(headers, row, map)].filter((item) => String(item || "").trim()).join("\n");
+    const businessType = String(csvValue(row, map, "businessType", 10) || "").trim();
     const result = saveLead(current, {
+      imported: true,
+      id: allocateLeadId(current),
       date: csvDate(csvValue(row, map, "date", 2)),
       business,
-      phone: csvValue(row, map, "phone", 1),
-      source: csvValue(row, map, "source", 3),
-      service: csvValue(row, map, "service", 4),
+      phone,
+      source: importedSource(csvValue(row, map, "source", 3)),
+      service: importedService(csvValue(row, map, "service", 4)),
       status: csvValue(row, map, "status", 5) || "New",
       email: csvValue(row, map, "email", 6),
       address: csvValue(row, map, "address", 7),
       next: csvDate(csvValue(row, map, "next", 8), ""),
-      notes: csvValue(row, map, "notes", 9),
-      businessType: csvValue(row, map, "businessType", 10),
+      notes,
+      businessType: businessType.toLowerCase() === "other" ? "Other" : businessType,
       executive: options.executive || "",
     });
     if (!result.ok) {
       skipped.push(`Row ${line}: ${result.error}`);
+      return;
+    }
+    const known = new Set((current.leads || []).map((lead) => lead.id));
+    const added = (result.data.leads || []).filter((lead) => lead?.id && !known.has(lead.id));
+    if (added.length !== 1) {
+      skipped.push(`Row ${line}: could not assign a new lead ID.`);
       return;
     }
     current = result.data;
@@ -1828,7 +1977,12 @@ export function saveLead(data, draft) {
   if (!business) return { ok: false, error: "Business / customer name is required." };
   if (!draft.date) return { ok: false, error: "Lead date is required." };
   const existing = (data.leads || []).find((item) => item.id && item.id === draft.id);
-  const status = mapLeadStatus(draft.status || existing?.status || "New");
+  if (!draft.imported && !dateIsAllowed(draft.date, existing?.date || "")) {
+    return { ok: false, error: "Lead date cannot be before today." };
+  }
+  const status = existing || draft.imported
+    ? mapLeadStatus(draft.status || existing?.status || "New")
+    : "New";
   const phone = formatPhone(draft.phone);
   const digits = phoneDigits(phone);
   if (phoneError(phone)) return { ok: false, error: PHONE_ERROR };
@@ -1845,16 +1999,27 @@ export function saveLead(data, draft) {
     if (emailError(email, { required: true })) return { ok: false, error: EMAIL_ERROR };
   }
   if (emailError(email)) return { ok: false, error: EMAIL_ERROR };
-  const id = existing ? existing.id : claimLeadId(draft.id);
+  const idAlreadyUsed = (value) => (data.leads || []).some((item) => item.id === value);
+  let id = existing ? existing.id : "";
+  if (!id) {
+    id = draft.id && leadIdTaken(draft.id) && !idAlreadyUsed(draft.id) ? draft.id : claimLeadId(draft.id);
+    if (!id || idAlreadyUsed(id)) id = allocateLeadId(data);
+  }
   if (!id) return { ok: false, error: "Lead ID is required." };
   let calls = Array.isArray(existing?.calls) ? existing.calls.map(normalizeCall).filter(Boolean) : [];
+  const unanswered = draft.call?.outcome === "Not Answered";
+  if (draft.call?.next && !dateIsAllowed(draft.call.next)) {
+    return { ok: false, error: "Next follow-up date cannot be before today." };
+  }
   if (draft.call) {
+    const previousCall = Number.isInteger(draft.callIndex) ? (existing?.calls || [])[draft.callIndex] : null;
     const rec = normalizeCall({
       date: draft.call.date || todayISO(),
       outcome: draft.call.outcome,
-      status: draft.call.status || status,
+      status: unanswered ? (existing?.status || status) : (draft.call.status || status),
       next: draft.call.next,
       note: draft.call.note,
+      createdAt: previousCall?.createdAt || new Date().toISOString(),
     });
     if (rec) {
       if (Number.isInteger(draft.callIndex) && draft.callIndex >= 0 && draft.callIndex < calls.length) {
@@ -1865,7 +2030,7 @@ export function saveLead(data, draft) {
     }
   }
   const lastCall = calls[calls.length - 1];
-  const nextStatus = draft.call?.status || status;
+  const nextStatus = draft.call ? (unanswered ? (existing?.status || status) : (draft.call.status || status)) : status;
   const next = normalizeLead({
     id,
     date: draft.date,
@@ -1894,12 +2059,22 @@ export function saveLead(data, draft) {
     return { ok: false, error: LEAD_PHONE_EXISTS_MESSAGE };
   }
   const currentLeads = Array.isArray(data.leads) ? data.leads : [];
+  let replacedLead = false;
   const leads = existing
-    ? currentLeads.map((item) => (item.id === existing.id ? next : item))
+    ? currentLeads.map((item) => {
+      if (replacedLead || item.id !== existing.id) return item;
+      replacedLead = true;
+      return next;
+    })
     : [...currentLeads, next];
   const followUp = followUpFromLead(next);
+  let replacedFollowUp = false;
   const followUps = (data.followUps || []).some((item) => item.id === next.id)
-    ? data.followUps.map((item) => (item.id === next.id ? followUp : item))
+    ? data.followUps.map((item) => {
+      if (replacedFollowUp || item.id !== next.id) return item;
+      replacedFollowUp = true;
+      return followUp;
+    })
     : next.status === "Converted" || next.status === "Lost" || next.next
       ? [...(data.followUps || []), followUp]
       : (data.followUps || []);
@@ -2068,6 +2243,53 @@ export function quotesForProjects(projects) {
     const code = String(quote.clientCode || "").trim().toLowerCase();
     return (name && keys.names.has(name)) || (code && keys.codes.has(code));
   });
+}
+
+export function serviceTypeFromInterest(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return "";
+  if (text.includes("both")) return "both";
+  const marketing = text.includes("marketing");
+  const software = text.includes("software");
+  if (marketing && software) return "both";
+  if (marketing) return "marketing";
+  if (software) return "software";
+  return "";
+}
+
+export function sharedLeadRows() {
+  try {
+    const raw = JSON.parse(crmStorage.getItem(LEAD_INDEX_KEY) || "null");
+    return Array.isArray(raw?.leads) ? raw.leads : [];
+  } catch {
+    return [];
+  }
+}
+
+export function interestedServiceType(name) {
+  const key = String(name || "").trim().toLowerCase();
+  if (!key) return "";
+  let found = "";
+  function consider(service) {
+    const type = serviceTypeFromInterest(service);
+    if (type === "both") found = "both";
+    else if (type && found !== "both") found = type;
+  }
+  sharedLeadRows().forEach((lead) => {
+    const business = String(lead?.business || lead?.name || "").trim().toLowerCase();
+    if (business === key) consider(lead.service);
+  });
+  if (found !== "both") {
+    eachSalesAccount((raw) => {
+      (raw?.leads || []).forEach((lead) => {
+        const business = String(lead?.business || lead?.name || "").trim().toLowerCase();
+        if (business === key) consider(lead.service);
+      });
+    });
+  }
+  if (found) return found;
+  const quote = quoteForClientRecord({ name });
+  return quote ? projectTypeFromQuote(quote) : "";
 }
 
 export function quotesByServiceType(types) {
@@ -2601,7 +2823,7 @@ export function quotationDocument(quote, heading = "QUOTATION") {
     ? quote.items
     : [{ packageName: quote.packageName, price: quote.price, scope: quote.scope }];
   const rows = lines.map((line, index) => `<tr><td><strong>${index + 1}. ${escapeHtml(line.packageName)}</strong><div class="scope">${formatScopeHtml(line.scope)}</div></td><td>${escapeHtml(formatQuoteAmount(line.price))}</td></tr>`).join("");
-  const percent = formatDiscountPercent(figures.percent);
+  const percent = formatDiscountPercent(discountPercentOf(quote) || figures.percent);
   return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(quote.number || heading)}</title><style>
     body{margin:0;background:#f3f1f6;color:#1c1a24;font:15px/1.45 "Segoe UI",Arial,sans-serif}
     .sheet{max-width:820px;margin:28px auto;background:#fff;border-radius:28px;padding:42px 48px 28px;box-shadow:0 12px 40px rgba(22,18,43,.08)}

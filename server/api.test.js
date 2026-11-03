@@ -269,3 +269,81 @@ test("lead, client, and project IDs and lead phones cannot be reserved twice", a
   const denied = await json("/api/registry/claim", { method: "POST", token: staff.data.token, body: { book: "leads" } });
   assert.equal(denied.res.status, 403);
 });
+
+test("marketing and the project manager share one project for a client interested in both services", async () => {
+  const bcrypt = (await import("bcryptjs")).default;
+  for (const account of [
+    ["PM001", "pm", "pm123456"],
+    ["MD001", "marketing", "md123456"],
+  ]) {
+    const [username, role, password] = account;
+    if (!(await User.findOne({ username }))) {
+      await User.create({
+        username,
+        role,
+        passwordHash: await bcrypt.hash(password, 10),
+        passwordSource: "updated",
+        active: true,
+      });
+    }
+  }
+  await Store.findOneAndUpdate(
+    { key: "neon-crm-projects", owner: "PM001" },
+    {
+      key: "neon-crm-projects",
+      owner: "PM001",
+      data: {
+        projects: [
+          { id: "software-1", name: "Portal", client: "Only Soft", code: "NPRJ001", type: "software", milestones: [{ id: "m1", department: "software", title: "Build" }] },
+          { id: "both-1", name: "Shared", client: "Both Co", code: "NPRJ002", type: "both", milestones: [{ id: "m2", department: "software", title: "API" }] },
+        ],
+        meetings: [{ id: "meet-1" }],
+      },
+    },
+    { upsert: true }
+  );
+  await Store.findOneAndUpdate(
+    { key: "neon-crm-sales", owner: "SD001" },
+    { key: "neon-crm-sales", owner: "SD001", data: { leads: [{ id: "LEAD-0001", business: "Both Co", service: "Both", status: "Converted" }] } },
+    { upsert: true }
+  );
+  const marketing = await json("/api/auth/login", { method: "POST", body: { username: "MD001", password: "md123456" } });
+  assert.equal(marketing.res.status, 200);
+  const boot = await json("/api/bootstrap", { token: marketing.data.token });
+  const shared = boot.data.stores.find((item) => item.key === "neon-crm-projects" && item.owner === "PM001");
+  assert.deepEqual(shared.data.projects.map((item) => item.id), ["both-1"]);
+  const leads = boot.data.stores.find((item) => item.key === "neon-crm-lead-index");
+  assert.equal(leads.data.leads.find((item) => item.business === "Both Co").service, "Both");
+  const saved = await json("/api/stores/batch", {
+    method: "PUT",
+    token: marketing.data.token,
+    body: {
+      items: [{
+        key: "neon-crm-projects",
+        owner: "PM001",
+        data: {
+          projects: [{
+            id: "both-1",
+            name: "Shared",
+            client: "Both Co",
+            code: "NPRJ009",
+            type: "both",
+            milestones: [{ id: "m3", department: "marketing", title: "Posts" }],
+          }],
+          meetings: [],
+        },
+      }],
+    },
+  });
+  assert.equal(saved.res.status, 200);
+  const stored = await Store.findOne({ key: "neon-crm-projects", owner: "PM001" }).lean();
+  assert.equal(stored.data.projects.length, 2);
+  const both = stored.data.projects.find((item) => item.id === "both-1");
+  assert.equal(both.code, "NPRJ002");
+  assert.equal(stored.data.meetings.length, 1);
+  assert.ok(both.milestones.some((item) => item.title === "API"));
+  assert.ok(both.milestones.some((item) => item.title === "Posts"));
+  const manager = await json("/api/auth/login", { method: "POST", body: { username: "PM001", password: "pm123456" } });
+  const managerBoot = await json("/api/bootstrap", { token: manager.data.token });
+  assert.ok(!managerBoot.data.stores.some((item) => item.owner === "PM001" && item.key === "neon-crm-projects" && item.data.projects.length === 1));
+});

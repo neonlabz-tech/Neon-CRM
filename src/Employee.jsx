@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { minSelectableDate } from "./sales.js";
 import { createPortal } from "react-dom";
 import { logActivity, loadActivity, formatStamp } from "./activity.js";
 import { BackButton } from "./BackButton.jsx";
@@ -652,11 +653,11 @@ function TaskForm({ task, milestones, onClose, onSave }) {
             </label>
             <label>
               Start
-              <input type="date" value={draft.startDate} onChange={(event) => setDraft({ ...draft, startDate: event.target.value })} />
+              <input type="date" min={minSelectableDate(draft.startDate)} value={draft.startDate} onChange={(event) => setDraft({ ...draft, startDate: event.target.value })} />
             </label>
             <label>
               Due
-              <input type="date" value={draft.dueDate} onChange={(event) => setDraft({ ...draft, dueDate: event.target.value })} />
+              <input type="date" min={minSelectableDate(draft.dueDate)} value={draft.dueDate} onChange={(event) => setDraft({ ...draft, dueDate: event.target.value })} />
             </label>
           </div>
           {error ? <p className="form-error">{error}</p> : null}

@@ -22,8 +22,9 @@ import {
   formatMoney,
   inDateRange,
   loadCeoSalesControl,
+  minSelectableDate,
   monthBounds,
-  nextCompanyLeadId,
+  reserveNextLeadId,
   nextManualSaleId,
   proratedTarget,
   releaseSalesPaymentsForApproval,
@@ -529,7 +530,7 @@ function LeadsPage(props) {
           <button
             className="primary"
             type="button"
-            onClick={() => setOpen(blankLead("", nextCompanyLeadId()))}
+            onClick={() => setOpen(blankLead("", reserveNextLeadId()))}
           >
             + Add Lead
           </button>
@@ -598,7 +599,7 @@ function LeadsPage(props) {
         <LeadEditor
           lead={open}
           staff={staff}
-          nextId={open.business ? open.id : nextCompanyLeadId()}
+          nextId={open.id}
           onClose={() => setOpen(null)}
           onSave={save}
         />
@@ -966,7 +967,8 @@ function SettingsPage({ settings, refresh, notify }) {
 }
 
 function LeadEditor({ lead, staff, nextId, onClose, onSave }) {
-  const existing = Boolean(lead.business);
+  const saved = !lead.unsaved;
+  const existing = saved || Boolean(lead.business);
   const [draft, setDraft] = useState({
     ...lead,
     id: lead.id || nextId,
@@ -1018,7 +1020,7 @@ function LeadEditor({ lead, staff, nextId, onClose, onSave }) {
           </label>
           <label>
             Date
-            <input type="date" value={draft.date} onChange={(event) => setDraft({ ...draft, date: event.target.value })} required />
+            <input type="date" min={minSelectableDate(lead?.date)} value={draft.date} onChange={(event) => setDraft({ ...draft, date: event.target.value })} required />
           </label>
           <label>
             Business / Customer
@@ -1062,12 +1064,6 @@ function LeadEditor({ lead, staff, nextId, onClose, onSave }) {
           </label>
           {existing ? (
             <>
-              <label>
-                Lead Status
-                <select value={draft.status} onChange={(event) => setDraft({ ...draft, status: event.target.value })}>
-                  {LEAD_STAGES.map((item) => <option key={item}>{item}</option>)}
-                </select>
-              </label>
               <label className="span-all">
                 Notes
                 <textarea value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} rows={2} />
@@ -1084,6 +1080,7 @@ function LeadEditor({ lead, staff, nextId, onClose, onSave }) {
                 <div>
                   <b>{item.date} · {item.outcome}</b>
                   <div className="muted">{item.note || "No notes"} · {item.status}</div>
+                  {item.createdAt ? <div className="muted">Recorded {new Date(item.createdAt).toLocaleString("en-GB", { timeZone: "Asia/Colombo", day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}</div> : null}
                   <div className="muted">Next: {item.next || "—"}</div>
                 </div>
                 <button className="link-btn" type="button" onClick={() => startCall(index)}>Edit</button>
@@ -1098,19 +1095,19 @@ function LeadEditor({ lead, staff, nextId, onClose, onSave }) {
                   </label>
                   <label>
                     Call Outcome
-                    <select value={call.outcome} onChange={(event) => setCall({ ...call, outcome: event.target.value })}>
+                    <select value={call.outcome} onChange={(event) => setCall({ ...call, outcome: event.target.value, status: event.target.value === "Not Answered" ? draft.status : call.status })}>
                       {CALL_OUTCOMES.map((item) => <option key={item}>{item}</option>)}
                     </select>
                   </label>
                   <label>
                     Updated Lead Status
-                    <select value={call.status} onChange={(event) => setCall({ ...call, status: event.target.value })}>
+                    <select value={call.outcome === "Not Answered" ? draft.status : call.status} onChange={(event) => setCall({ ...call, status: event.target.value })} disabled={call.outcome === "Not Answered"}>
                       {LEAD_STAGES.map((item) => <option key={item}>{item}</option>)}
                     </select>
                   </label>
                   <label>
                     Next Follow-up Date
-                    <input type="date" value={call.next} onChange={(event) => setCall({ ...call, next: event.target.value })} />
+                    <input type="date" min={minSelectableDate()} value={call.next} onChange={(event) => setCall({ ...call, next: event.target.value })} />
                   </label>
                   <label className="span-all">
                     Call Notes
@@ -1364,6 +1361,7 @@ function blankLead(executive, id) {
     source: "Other",
     service: "",
     status: "New",
+    unsaved: true,
     next: "",
     notes: "",
     executive,

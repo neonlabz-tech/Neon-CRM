@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "./api.js";
-import { dismissNotice, loadNotices, NOTICES_CHANGED, projectInvoiceById } from "./finance.js";
+import { dismissNotice, dismissNoticesFor, loadNotices, NOTICES_CHANGED, projectInvoiceById } from "./finance.js";
 import { InvoiceDialog } from "./InvoiceView.jsx";
 import { openCeoSalesApprovals } from "./sales.js";
 import { sessionAccount } from "./scope.js";
@@ -93,6 +93,19 @@ export function NotificationBell() {
         <div className="bell-panel">
           <div className="bell-title">
             Notifications
+            {items.length ? (
+              <button
+                className="ghost"
+                type="button"
+                onClick={() => {
+                  if (!window.confirm("Clear all of your notifications?")) return;
+                  dismissNoticesFor(username);
+                  refresh();
+                }}
+              >
+                Clear all
+              </button>
+            ) : null}
             <button className="ghost" type="button" onClick={() => setOpen(false)}>Close</button>
           </div>
           <p className="bell-summary">{count ? `${count} waiting` : "Inbox is empty"}</p>

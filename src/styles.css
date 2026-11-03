@@ -3842,6 +3842,10 @@ input.file-input {
   align-items: stretch;
 }
 
+.chart-grid > .chart-span {
+  grid-column: 1 / -1;
+}
+
 .md-dash-charts {
   grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
 }

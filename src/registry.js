@@ -97,39 +97,55 @@ function taken(book, code) {
   return Boolean(load()[book].ids[canonical(spec, value)]);
 }
 
+function rememberIn(registry, book, code) {
+  const spec = BOOKS[book];
+  const number = codeNumber(spec.prefix, code);
+  if (!number) return;
+  registry[book].ids[formatCode(spec.prefix, spec.width, number)] = true;
+}
+
 function refreshRegistry() {
   const remote = registryRequest("GET", "/api/bootstrap");
   const stores = Array.isArray(remote?.stores) ? remote.stores : null;
   if (!stores) return;
-  const registry = load();
+  const registry = blank();
   const record = stores.find((item) => item?.key === REGISTRY_KEY);
   const incoming = record?.data && typeof record.data === "object" ? record.data : {};
-  for (const book of Object.keys(BOOKS)) {
-    const ids = incoming[book]?.ids && typeof incoming[book].ids === "object" ? incoming[book].ids : {};
-    Object.keys(ids).forEach((id) => {
-      const key = canonical(BOOKS[book], id);
-      if (key) registry[book].ids[key] = true;
-    });
-  }
   stores.forEach((item) => {
-    if (item?.key !== "neon-crm-sales" || !item.data) return;
-    const leads = [
-      ...(Array.isArray(item.data.leads) ? item.data.leads : []),
-      ...(Array.isArray(item.data.followUps) ? item.data.followUps : []),
-    ];
-    leads.forEach((lead) => {
-      const key = canonical(BOOKS.leads, lead?.id);
-      if (key) registry.leads.ids[key] = true;
-    });
+    if (item?.key === "neon-crm-sales" && item.data) {
+      [...(item.data.leads || []), ...(item.data.followUps || [])].forEach((lead) => rememberIn(registry, "leads", lead?.id));
+      (item.data.leads || []).forEach((lead) => rememberIn(registry, "clients", lead?.clientCode));
+      (item.data.quotes || []).forEach((quote) => {
+        rememberIn(registry, "clients", quote?.clientCode);
+        rememberIn(registry, "leads", quote?.clientId);
+      });
+      (item.data.payments || []).forEach((payment) => rememberIn(registry, "leads", payment?.clientId));
+    }
+    if (item?.key === "neon-crm-projects" && item.data) {
+      (item.data.projects || []).forEach((project) => rememberIn(registry, "projects", project?.code));
+    }
+    if (item?.key === "neon-crm-clients" && Array.isArray(item.data)) {
+      item.data.forEach((client) => rememberIn(registry, "clients", client?.code));
+    }
+    if (item?.key === "neon-crm-marketing" && item.data) {
+      (item.data.clients || []).forEach((doc) => rememberIn(registry, "projects", doc?.projectId));
+    }
   });
   for (const book of Object.keys(BOOKS)) {
     const numbers = Object.keys(registry[book].ids).map((id) => codeNumber(BOOKS[book].prefix, id)).filter(Boolean);
-    registry[book].sequence = Math.max(registry[book].sequence, Number(incoming[book]?.sequence) || 0, ...numbers, 0);
+    const highest = numbers.length ? Math.max(...numbers) : 0;
+    const ids = incoming[book]?.ids && typeof incoming[book].ids === "object" ? incoming[book].ids : {};
+    Object.keys(ids).forEach((id) => {
+      const number = codeNumber(BOOKS[book].prefix, id);
+      if (number > 0 && number <= highest) rememberIn(registry, book, id);
+    });
+    const kept = Object.keys(registry[book].ids).map((id) => codeNumber(BOOKS[book].prefix, id)).filter(Boolean);
+    registry[book].sequence = kept.length ? Math.max(...kept) : 0;
   }
   const phones = incoming.phones && typeof incoming.phones === "object" ? incoming.phones : {};
   Object.entries(phones).forEach(([digits, id]) => {
     const key = String(digits || "").replace(/\D/g, "").slice(0, 10);
-    if (key.length === 10 && id && !registry.phones[key]) registry.phones[key] = id;
+    if (key.length === 10 && id && registry.leads.ids[canonical(BOOKS.leads, id)]) registry.phones[key] = id;
   });
   crmStorage.keep(REGISTRY_KEY, JSON.stringify(registry));
 }

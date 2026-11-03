@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import neonLogo from "./assets/neonlabz-logo.png";
 import { loadClients } from "./clients.js";
+import { api } from "./api.js";
+import { crmStorage } from "./storage.js";
 import { dataOwner, sessionAccount } from "./scope.js";
 import { loadUsers } from "./crm.js";
 import { dismissNotice, loadFinance, loadNotices, projectInvoiceById, projectInvoiceFor } from "./finance.js";
@@ -31,8 +33,14 @@ import {
   answeredCallsOn,
   approvedInstallments,
   assignConvertedClientCodes,
-  collectionTarget,
   confirmedCollections,
+  discountPercentOf,
+  minSelectableDate,
+  moneyFromPercent,
+  proratedTarget,
+  staffCommissionRate,
+  staffDailyGoals,
+  staffMonthlyTarget,
   inReportingPeriod,
   convertedClients,
   convertedPaymentClients,
@@ -54,7 +62,7 @@ import {
   loadSales,
   releaseSalesPaymentsForApproval,
   importLeadsFromCsv,
-  nextLeadId,
+  reserveNextLeadId,
   nextQuoteNumber,
   outstandingBalance,
   previewQuote,
@@ -126,6 +134,40 @@ export function SalesWorkspace({ access, username, section, paymentsSource, pers
   useEffect(() => {
     releaseSalesPaymentsForApproval();
   }, [data.payments]);
+  useEffect(() => {
+    const owner = dataOwner();
+    if (!owner || sessionAccount()?.role !== "sales") return undefined;
+    let stop = false;
+    async function pullTargets() {
+      try {
+        const remote = await api("/api/bootstrap");
+        const store = (remote.stores || []).find((item) => item.key === "neon-crm-sales" && item.owner === owner);
+        if (!store?.data || stop) return;
+        const current = loadSales();
+        const next = {
+          ...current,
+          goals: store.data.goals || current.goals,
+          rates: store.data.rates || current.rates,
+          team: store.data.team || current.team,
+        };
+        const same = JSON.stringify([current.goals, current.rates, current.team]) === JSON.stringify([next.goals, next.rates, next.team]);
+        if (same) return;
+        const { packages, ...rest } = next;
+        crmStorage.keep(`neon-crm-sales:${owner}`, JSON.stringify(rest));
+        if (!stop) setData(loadSales());
+      } catch {
+        // The dashboard keeps the targets loaded at sign-in until the next refresh.
+      }
+    }
+    pullTargets();
+    const timer = window.setInterval(pullTargets, 15000);
+    window.addEventListener("focus", pullTargets);
+    return () => {
+      stop = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", pullTargets);
+    };
+  }, []);
   const executives = useMemo(() => {
     if (personal && username) {
       const self = loadUsers().find((user) => user.username === username);
@@ -189,23 +231,26 @@ export function SalesWorkspace({ access, username, section, paymentsSource, pers
 }
 
 function OverviewPanel({ data, month, range, setMonth, setRange, executives, canEdit, commit }) {
-  const target = collectionTarget(data, month, executives.map((user) => user.username));
+  const owner = dataOwner();
+  const monthlyTarget = staffMonthlyTarget(owner);
+  const dailyGoals = staffDailyGoals(owner);
+  const commissionRate = staffCommissionRate(owner);
+  const ranged = Boolean(range?.from && range?.to);
+  const target = ranged ? proratedTarget(monthlyTarget, range.from, range.to) : monthlyTarget;
   const collected = confirmedCollections(data, month, range);
   const remaining = Math.max(0, target - collected);
   const percent = target > 0 ? Math.min(100, Math.round((collected / target) * 100)) : 0;
-  const commission = collected * (Number(data.rates?.rate) || 0) / 100;
+  const commission = collected * commissionRate / 100;
   const label = reportingLabel(month, range);
-  const ranged = Boolean(range?.from && range?.to);
   const today = todayISO();
   const [day, setDay] = useState(() => missionDay());
   const leads = data.leads || [];
   const due = dueLeads(leads, today);
   const answered = answeredCallsOn(leads, day);
-  const callTarget = Number(data.goals?.daily) || 0;
-  const leadGoal = Number(data.goals?.leadTarget) || 0;
+  const callTarget = dailyGoals.calls;
+  const leadGoal = dailyGoals.leads;
   const newToday = leads.filter((item) => item.date === day).length;
   const newMonth = leads.filter((item) => inReportingPeriod(item.date, month, range)).length;
-  const owner = dataOwner();
   const pending = outstandingBalance(owner);
   const recent = (data.payments || [])
     .filter((payment) => payment.status !== "cancelled" && inReportingPeriod(payment.date, month, range))
@@ -241,10 +286,10 @@ function OverviewPanel({ data, month, range, setMonth, setRange, executives, can
         <Stat label="Monthly sales target" value={formatMoney(target)} note={monthLabel(month)} />
         <Stat label="Confirmed collections" value={formatMoney(collected)} note={ranged ? `Payments received ${label}` : "Payments received in this month"} />
         <Stat label="Remaining target" value={formatMoney(remaining)} note="To achieve the monthly target" />
-        <Stat label="Earned commission" value={formatMoney(commission)} note={`${data.rates?.rate || 0}% on confirmed collections`} />
+        <Stat label="Earned commission" value={formatMoney(commission)} note={`${commissionRate || 0}% on confirmed collections`} />
       </div>
       <div className="chart-grid">
-        <article className="panel">
+        <article className="panel chart-span">
           <h2>Monthly sales progress</h2>
           <div className="sales-statrow">
             <div><span>Achievement</span><b>{percent}%</b></div>
@@ -252,15 +297,6 @@ function OverviewPanel({ data, month, range, setMonth, setRange, executives, can
             <div><span>Target</span><b>{formatMoney(target)}</b></div>
           </div>
           <div className="sales-progress" aria-hidden="true"><b style={{ width: `${percent}%` }} /></div>
-        </article>
-        <article className="panel">
-          <h2>Today's call performance</h2>
-          <div className="sales-statrow">
-            <div><span>Answered calls</span><b>{answered}</b></div>
-            <div><span>Call target</span><b>{callTarget}</b></div>
-            <div><span>Remaining</span><b>{Math.max(0, callTarget - answered)}</b></div>
-          </div>
-          <div className="sales-progress" aria-hidden="true"><b style={{ width: `${callTarget ? Math.min(100, (answered / callTarget) * 100) : 0}%` }} /></div>
         </article>
       </div>
       <div className="stats">
@@ -572,7 +608,7 @@ function clientQuoteDraft(client, packages, quote) {
         };
       })
       : [blankSalesQuoteLine(packages, packageCategory(client.service))],
-    discount: String(quote?.discount || 0),
+    discount: String(discountPercentOf(quote) || 0),
     date: quote?.date || date,
     valid: quote?.valid || addDays(quote?.date || date, 14),
     terms: quote?.terms || "As agreed with the client.",
@@ -639,8 +675,7 @@ function SalesQuotationsPanel({ data, commit, canEdit }) {
   }
 
   const subtotal = (draft?.lines || []).reduce((sum, line) => sum + (Number(line.price) || 0), 0);
-  const offer = Number(draft?.discount);
-  const total = Math.max(0, subtotal - (Number.isFinite(offer) && offer > 0 ? offer : 0));
+  const total = Math.max(0, subtotal - moneyFromPercent(subtotal, draft?.discount));
 
   return (
     <div className="stack">
@@ -734,7 +769,7 @@ function SalesQuotationsPanel({ data, commit, canEdit }) {
               </label>
               <label>
                 Quotation date
-                <input type="date" value={draft.date} onChange={(event) => setDraft({ ...draft, date: event.target.value })} required />
+                <input type="date" min={minSelectableDate(draft.date)} value={draft.date} onChange={(event) => setDraft({ ...draft, date: event.target.value })} required />
               </label>
               <div className="span-all quote-lines">
                 {draft.lines.map((line, index) => {
@@ -806,8 +841,8 @@ function SalesQuotationsPanel({ data, commit, canEdit }) {
                 </button>
               </div>
               <label>
-                Offer / discount (LKR)
-                <input type="number" min="0" step="0.01" value={draft.discount} onChange={(event) => setDraft({ ...draft, discount: event.target.value })} />
+                Offer / discount (%)
+                <input type="number" min="0" max="100" step="0.1" value={draft.discount} onChange={(event) => setDraft({ ...draft, discount: event.target.value })} />
               </label>
               <div className="budget-total span-all">
                 <span>Promised amount</span>
@@ -837,7 +872,7 @@ function QuotesPanel({ data, commit, canEdit, projects, documentHeading = "QUOTA
   const [removing, setRemoving] = useState(null);
   const [removeError, setRemoveError] = useState("");
   const subtotal = draft.lines.reduce((sum, line) => sum + (Number(line.price) || 0), 0);
-  const figures = quotationFigures(subtotal, draft.discount);
+  const figures = { ...quotationFigures(subtotal, moneyFromPercent(subtotal, draft.discount)), percent: Number(draft.discount) || 0 };
 
   function setField(field, value) {
     setDraft((current) => ({ ...current, [field]: value }));
@@ -994,11 +1029,11 @@ function QuotesPanel({ data, commit, canEdit, projects, documentHeading = "QUOTA
               {draft.contactFromSales ? <p className="page-note span-all">Email, phone, and address are filled from the sales follow-up for this client.</p> : null}
               <label>
                 Quotation date
-                <input type="date" value={draft.date} onChange={(event) => setField("date", event.target.value)} required />
+                <input type="date" min={minSelectableDate(draft.date)} value={draft.date} onChange={(event) => setField("date", event.target.value)} required />
               </label>
               <label>
                 Valid until
-                <input type="date" value={draft.valid} onChange={(event) => setField("valid", event.target.value)} required />
+                <input type="date" min={minSelectableDate(draft.valid)} value={draft.valid} onChange={(event) => setField("valid", event.target.value)} required />
               </label>
               <div className="span-all quote-lines">
                 {draft.lines.map((line, index) => {
@@ -1080,10 +1115,10 @@ function QuotesPanel({ data, commit, canEdit, projects, documentHeading = "QUOTA
                   Add another package
                 </button>
               </div>
-              <p className="hint span-all">Subtotal {formatMoney(figures.subtotal)} · Discount {formatMoney(figures.discount)} · VAT (8%) {formatMoney(figures.vat)} · Estimated grand total {formatMoney(figures.grand)}</p>
+              <p className="hint span-all">Subtotal {formatMoney(figures.subtotal)} · Discount {formatDiscountPercent(draft.discount)}% ({formatMoney(figures.discount)}) · VAT (8%) {formatMoney(figures.vat)} · Estimated grand total {formatMoney(figures.grand)}</p>
               <label>
-                Offer / discount (LKR)
-                <input type="number" min="0" step="0.01" value={draft.discount} onChange={(event) => setField("discount", event.target.value)} required />
+                Offer / discount (%)
+                <input type="number" min="0" max="100" step="0.1" value={draft.discount} onChange={(event) => setField("discount", event.target.value)} required />
               </label>
               <label className="span-all">
                 Payment terms
@@ -1195,7 +1230,7 @@ function QuotePaper({ quote, heading = "QUOTATION" }) {
   if (String(heading || "").toUpperCase() === "INVOICE") {
     return <iframe className="receipt-frame invoice-frame" title={quote.number || "Invoice"} srcDoc={quotationDocument(quote, "INVOICE")} />;
   }
-  const figures = quotationFigures(quote.price, quote.discount);
+  const figures = { ...quotationFigures(quote.price, quote.discount), percent: discountPercentOf(quote) };
   const lines = quote.items?.length ? quote.items : [];
   return (
     <article className="quote-paper">
@@ -1405,7 +1440,7 @@ function PaymentsPanel({ data, commit, canEdit, month, range, source }) {
               </label>
               <label>
                 Payment date
-                <input type="date" value={draft.date} onChange={(event) => setDraft({ ...draft, date: event.target.value })} required />
+                <input type="date" min={minSelectableDate(draft.date)} value={draft.date} onChange={(event) => setDraft({ ...draft, date: event.target.value })} required />
               </label>
               {ownPayments ? (
                 <label>
@@ -1465,7 +1500,6 @@ function PaymentsPanel({ data, commit, canEdit, month, range, source }) {
         </article>
       ) : (
         <div className="toolbar">
-          <button className="ghost" type="button" onClick={() => downloadPayments(visible, quotes, month)}>Export month CSV</button>
         </div>
       )}
       <article className="panel">
@@ -1478,7 +1512,6 @@ function PaymentsPanel({ data, commit, canEdit, month, range, source }) {
               placeholder="Filter by client name or ID"
               aria-label="Filter by client name or ID"
             />
-            <button className="ghost" type="button" onClick={() => downloadPayments(visible, quotes, month)}>Export CSV</button>
           </div>
         </div>
         {visible.length === 0 ? (
@@ -1787,8 +1820,8 @@ function FollowUpPanel({ data, commit, canEdit, executives, username, month, all
                   reader.readAsText(file);
                 }}
               />
-              <button className="ghost" type="button" onClick={() => csvInput.current?.click()}>Import CSV</button>
-              <button className="primary" type="button" onClick={() => { setOpen(blankLead(defaultExecutive(executives, username), month, nextLeadId())); setError(""); setNotice(""); }}>
+              <button className="ghost" type="button" title="Columns: Date, Business / Customer, Phone, Source, Interested Service, Lead Status, Business Type, Address, Email" onClick={() => csvInput.current?.click()}>Import CSV</button>
+              <button className="primary" type="button" onClick={() => { setOpen(blankLead(defaultExecutive(executives, username), month, reserveNextLeadId())); setError(""); setNotice(""); }}>
                 + Add lead
               </button>
             </>
@@ -1889,7 +1922,8 @@ function FollowUpPanel({ data, commit, canEdit, executives, username, month, all
 }
 
 function LeadDialog({ lead, executives, canEdit, error, onClose, onSave, onDelete }) {
-  const existing = Boolean(lead.business);
+  const saved = !lead.unsaved;
+  const existing = saved || Boolean(lead.business);
   const [draft, setDraft] = useState({ ...lead, phone: formatPhone(lead.phone) });
   const [call, setCall] = useState(null);
   const [callIndex, setCallIndex] = useState(null);
@@ -1923,7 +1957,7 @@ function LeadDialog({ lead, executives, canEdit, error, onClose, onSave, onDelet
           ) : null}
           <label>
             Date
-            <input type="date" value={draft.date} onChange={(event) => setField("date", event.target.value)} required />
+            <input type="date" min={minSelectableDate(lead.date)} value={draft.date} onChange={(event) => setField("date", event.target.value)} required />
           </label>
           <label>
             Business / Customer
@@ -1960,12 +1994,6 @@ function LeadDialog({ lead, executives, canEdit, error, onClose, onSave, onDelet
           </label>
           {existing ? (
             <>
-              <label>
-                Lead status
-                <select value={draft.status} onChange={(event) => setField("status", event.target.value)}>
-                  {LEAD_STAGES.map((item) => <option key={item}>{item}</option>)}
-                </select>
-              </label>
               {executives.length > 1 ? (
                 <label>
                   Sales executive
@@ -2001,6 +2029,7 @@ function LeadDialog({ lead, executives, canEdit, error, onClose, onSave, onDelet
                   >
                     <strong>{item.date || "—"} · {item.outcome || "—"}</strong>
                     <span>{item.note || "No notes"}</span>
+                    {item.createdAt ? <small>Recorded {formatRecordedAt(item.createdAt)}</small> : null}
                     <small>Edit record #{index + 1}</small>
                   </button>
                 ))}
@@ -2022,19 +2051,19 @@ function LeadDialog({ lead, executives, canEdit, error, onClose, onSave, onDelet
                   </label>
                   <label>
                     Call result
-                    <select value={call.outcome} onChange={(event) => setCall({ ...call, outcome: event.target.value })}>
+                    <select value={call.outcome} onChange={(event) => setCall({ ...call, outcome: event.target.value, status: event.target.value === "Not Answered" ? draft.status : call.status })}>
                       {CALL_OUTCOMES.map((item) => <option key={item}>{item}</option>)}
                     </select>
                   </label>
                   <label>
                     Lead status after call
-                    <select value={call.status} onChange={(event) => setCall({ ...call, status: event.target.value })}>
+                    <select value={call.outcome === "Not Answered" ? draft.status : call.status} onChange={(event) => setCall({ ...call, status: event.target.value })} disabled={call.outcome === "Not Answered"}>
                       {LEAD_STAGES.map((item) => <option key={item}>{item}</option>)}
                     </select>
                   </label>
                   <label>
                     Next follow-up date
-                    <input type="date" value={call.next} onChange={(event) => setCall({ ...call, next: event.target.value })} />
+                    <input type="date" min={minSelectableDate()} value={call.next} onChange={(event) => setCall({ ...call, next: event.target.value })} />
                   </label>
                   <label className="span-all">
                     Conversation / notes
@@ -2070,11 +2099,25 @@ function blankLead(executive, month, id = "") {
     source: "Other",
     service: "",
     status: "New",
+    unsaved: true,
     next: "",
     notes: "",
     executive,
     calls: [],
   };
+}
+
+function formatRecordedAt(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Colombo",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
 }
 
 function blankCall(lead) {
@@ -2621,7 +2664,7 @@ function draftFromQuote(quote, packages, projects) {
         period: item.period,
       };
     }),
-    discount: String(quote.discount),
+    discount: String(discountPercentOf(quote) || 0),
     terms: quote.terms,
     date: quote.date,
     valid: quote.valid,
@@ -2760,7 +2803,9 @@ function FollowStatus({ status }) {
 
 function dateInMonth(month) {
   const today = todayISO();
-  return today.slice(0, 7) === month ? today : `${month}-01`;
+  if (today.slice(0, 7) === month) return today;
+  const first = `${month}-01`;
+  return first < today ? today : first;
 }
 
 function blankPackage() {
