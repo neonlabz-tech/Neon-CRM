@@ -1,6 +1,6 @@
-import neonLogo from "./assets/neonlabz-logo.png";
+import { wrapLetterhead } from "./letterhead.js";
 import { blankClient, loadClients, nextClientCode, saveClients } from "./clients.js";
-import { claimClientCode, claimLeadId as reserveLeadId, forgetLeadPhone, leadIdTaken, leadPhoneHolder, noteClientCode, noteLeadId, rememberLeadPhone, suggestLeadId, syncLeadPhones } from "./registry.js";
+import { claimClientCode, forgetLeadPhone, leadPhoneHolder, noteClientCode, noteLeadId, rememberLeadPhone, syncLeadPhones } from "./registry.js";
 import { formatScopeHtml, sanitizeScopeHtml, scopeHasText } from "./richText.js";
 import { loadUsers } from "./crm.js";
 import { invoiceDocumentFromPayment, invoiceDocumentFromQuote } from "./brandDocument.js";
@@ -802,44 +802,20 @@ function saveLeadIndex(index) {
   }));
 }
 
-function claimLeadId(preferred) {
-  const harvested = harvestLeadIndex();
-  Object.keys(harvested.ids).forEach((id) => noteLeadId(id));
-  syncLeadPhones(harvested.phones);
-  const wanted = String(preferred || "").trim();
-  const free = wanted && !harvested.ids[wanted] && !leadIdTaken(wanted);
-  const id = reserveLeadId(free ? wanted : "");
-  saveLeadIndex({
-    sequence: Math.max(harvested.sequence, leadIdNumber(id)),
-    ids: { ...harvested.ids, ...(id ? { [id]: true } : {}) },
-    leads: directoryLeads(),
-  });
-  return id;
-}
-
 export function nextLeadId() {
-  const harvested = harvestLeadIndex();
-  Object.keys(harvested.ids).forEach((id) => noteLeadId(id));
-  syncLeadPhones(harvested.phones);
-  return suggestLeadId();
+  return previewNextLeadId();
 }
 
-export function reserveNextLeadId() {
-  return claimLeadId("") || nextLeadId();
+export function previewNextLeadId(data) {
+  let number = harvestLeadIndex().sequence;
+  (data?.leads || []).forEach((lead) => {
+    number = Math.max(number, leadIdNumber(lead?.id));
+  });
+  return formatLeadId(number + 1);
 }
 
-function allocateLeadId(data) {
-  const used = new Set((data?.leads || []).map((lead) => lead?.id).filter(Boolean));
-  let id = claimLeadId("");
-  if (id && !used.has(id)) return id;
-  let number = Math.max(0, harvestLeadIndex().sequence);
-  used.forEach((item) => { number = Math.max(number, leadIdNumber(item)); });
-  do {
-    number += 1;
-    id = formatLeadId(number);
-  } while (used.has(id) || leadIdTaken(id));
-  noteLeadId(id);
-  return id;
+export function reserveNextLeadId(data) {
+  return previewNextLeadId(data);
 }
 
 export function leadPhoneTaken(phone, exceptId = "") {
@@ -1936,7 +1912,7 @@ export function importLeadsFromCsv(data, text, options = {}) {
     const businessType = String(csvValue(row, map, "businessType", 10) || "").trim();
     const result = saveLead(current, {
       imported: true,
-      id: allocateLeadId(current),
+      unsaved: true,
       date: csvDate(csvValue(row, map, "date", 2)),
       business,
       phone,
@@ -1976,7 +1952,9 @@ export function saveLead(data, draft) {
   const business = String(draft.business || draft.name || "").trim();
   if (!business) return { ok: false, error: "Business / customer name is required." };
   if (!draft.date) return { ok: false, error: "Lead date is required." };
-  const existing = (data.leads || []).find((item) => item.id && item.id === draft.id);
+  const existing = draft.unsaved
+    ? null
+    : (data.leads || []).find((item) => item.id && item.id === draft.id);
   if (!draft.imported && !dateIsAllowed(draft.date, existing?.date || "")) {
     return { ok: false, error: "Lead date cannot be before today." };
   }
@@ -1999,18 +1977,23 @@ export function saveLead(data, draft) {
     if (emailError(email, { required: true })) return { ok: false, error: EMAIL_ERROR };
   }
   if (emailError(email)) return { ok: false, error: EMAIL_ERROR };
-  const idAlreadyUsed = (value) => (data.leads || []).some((item) => item.id === value);
-  let id = existing ? existing.id : "";
-  if (!id) {
-    id = draft.id && leadIdTaken(draft.id) && !idAlreadyUsed(draft.id) ? draft.id : claimLeadId(draft.id);
-    if (!id || idAlreadyUsed(id)) id = allocateLeadId(data);
-  }
-  if (!id) return { ok: false, error: "Lead ID is required." };
   let calls = Array.isArray(existing?.calls) ? existing.calls.map(normalizeCall).filter(Boolean) : [];
   const unanswered = draft.call?.outcome === "Not Answered";
   if (draft.call?.next && !dateIsAllowed(draft.call.next)) {
     return { ok: false, error: "Next follow-up date cannot be before today." };
   }
+  let id = existing ? existing.id : "";
+  if (!id) {
+    let number = Math.max(0, harvestLeadIndex().sequence);
+    (data.leads || []).forEach((lead) => {
+      number = Math.max(number, leadIdNumber(lead?.id));
+    });
+    do {
+      number += 1;
+      id = formatLeadId(number);
+    } while ((data.leads || []).some((lead) => lead.id === id));
+  }
+  if (!id) return { ok: false, error: "Lead ID is required." };
   if (draft.call) {
     const previousCall = Number.isInteger(draft.callIndex) ? (existing?.calls || [])[draft.callIndex] : null;
     const rec = normalizeCall({
@@ -2822,38 +2805,47 @@ export function quotationDocument(quote, heading = "QUOTATION") {
   const lines = quote.items?.length
     ? quote.items
     : [{ packageName: quote.packageName, price: quote.price, scope: quote.scope }];
-  const rows = lines.map((line, index) => `<tr><td><strong>${index + 1}. ${escapeHtml(line.packageName)}</strong><div class="scope">${formatScopeHtml(line.scope)}</div></td><td>${escapeHtml(formatQuoteAmount(line.price))}</td></tr>`).join("");
+  const rows = lines.map((line, index) => `<tr><td><strong>${index + 1}. ${escapeHtml(line.packageName)}</strong><div class="scope">${formatScopeHtml(line.scope)}</div></td><td class="money">${escapeHtml(formatQuoteAmount(line.price))}</td></tr>`).join("");
   const percent = formatDiscountPercent(discountPercentOf(quote) || figures.percent);
-  return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(quote.number || heading)}</title><style>
-    body{margin:0;background:#f3f1f6;color:#1c1a24;font:15px/1.45 "Segoe UI",Arial,sans-serif}
-    .sheet{max-width:820px;margin:28px auto;background:#fff;border-radius:28px;padding:42px 48px 28px;box-shadow:0 12px 40px rgba(22,18,43,.08)}
-    .head{display:flex;justify-content:space-between;gap:24px;align-items:flex-start}
-    .brand{display:flex;align-items:center}
-    .brand .logo{height:52px;width:auto;display:block}
-    .party{margin:18px 0 0;color:#3a3648;white-space:pre-wrap}
-    .party strong{display:block;color:#1c1a24}
-    .id{text-align:right}
-    .id strong{display:block;letter-spacing:.14em;font-size:18px}
-    .id span{display:block;margin-top:6px;color:#3a3648}
-    hr{border:0;border-top:1.5px solid #1c1a24;margin:22px 0}
-    table{width:100%;border-collapse:separate;border-spacing:0;border:1px solid #e4e0ea;border-radius:12px;overflow:hidden}
-    th,td{padding:16px 18px;vertical-align:top;text-align:left}
-    th{font-size:12px;letter-spacing:.08em;text-transform:uppercase}
-    td p,td .scope{margin:6px 0 0;color:#5c566c} td .scope p,td .scope div{margin:0 0 6px} td .scope :last-child{margin-bottom:0}
-    td:last-child,th:last-child{text-align:right;width:180px;font-variant-numeric:tabular-nums}
-    tbody tr+tr td{border-top:1px solid #ece8f2}
-    .totals{width:min(360px,100%);margin-left:auto;display:grid;gap:10px;padding:22px 4px 8px}
-    .totals p{display:flex;justify-content:space-between;gap:18px;margin:0}
-    .totals .discount{color:#1aa36a}
-    .totals .grand{border-top:1px solid #e4e0ea;padding-top:12px;font-weight:700}
-    .totals .grand span{max-width:140px}
-    h3{margin:0 0 8px;font-size:16px}
-    .terms p{margin:0;color:#3a3648;white-space:pre-wrap}
-    footer{color:#6d687c;font-size:13px}
-    button{margin:0 0 16px;padding:10px 14px;border:0;border-radius:8px;background:#873CFF;color:#fff;font-weight:700}
-    @page{size:A4;margin:14mm}
-    @media print{body{background:#fff}button{display:none}.sheet{margin:0;box-shadow:none;border-radius:0;max-width:none}}
-  </style><body><button onclick="window.print()">Print / Save as PDF</button><article class="sheet"><header class="head"><div><div class="brand"><img class="logo" src="${neonLogo}" alt="NeonLabz" /></div><p class="party"><strong>${escapeHtml(quote.client)}</strong>${escapeHtml(quote.address || "")}</p></div><div class="id"><strong>${escapeHtml(heading)}</strong><span>#${escapeHtml(quote.number || "")}</span><span>${escapeHtml(formatQuoteDate(quote.date))}</span></div></header><hr><table><thead><tr><th>Description</th><th>Total (LKR)</th></tr></thead><tbody>${rows}</tbody></table><div class="totals"><p><span>Subtotal</span><strong>LKR ${escapeHtml(formatQuoteAmount(figures.subtotal))}</strong></p><p class="discount"><span>Special Discount (${percent}%)</span><strong>-LKR ${escapeHtml(formatQuoteAmount(figures.discount))}</strong></p><p><span>VAT (8%)</span><strong>LKR ${escapeHtml(formatQuoteAmount(figures.vat))}</strong></p><p class="grand"><span>Estimated Grand Total</span><strong>LKR ${escapeHtml(formatQuoteAmount(figures.grand))}</strong></p></div><hr><section class="terms"><h3>Terms &amp; Conditions</h3><p>${escapeHtml(quote.terms || "")}</p></section><hr><footer>Neonlabz (Pvt) Ltd.</footer></article></body></html>`;
+  return wrapLetterhead({
+    title: quote.number || heading,
+    cover: {
+      title: heading,
+      preparedFor: quote.client || "Client",
+      period: quote.number ? `#${quote.number}` : "",
+      department: "Sales",
+      source: "Quotation",
+      date: quote.date,
+      preparedBy: "Neon Labz",
+    },
+    extraCss: `
+      .money { text-align:right; white-space:nowrap; width:140px; }
+      .scope { margin-top:6px; color:#69708A; }
+      .scope p, .scope div { margin:0 0 6px; }
+      .totals { width:280px; margin-left:auto; }
+      .totals p { display:flex; justify-content:space-between; gap:12px; }
+      .totals .discount { color:#1aa36a; }
+      .totals .grand { border-top:2px solid #873CFF; padding-top:8px; font-weight:700; }
+      .terms { white-space:pre-wrap; }
+    `,
+    body: `
+      <p class="kicker">${escapeHtml(heading)}</p>
+      <h1>${escapeHtml(quote.client || "Client")}</h1>
+      <p class="meta">${escapeHtml([quote.number ? `#${quote.number}` : "", formatQuoteDate(quote.date), quote.address].filter(Boolean).join(" · "))}</p>
+      <table>
+        <thead><tr><th>Description</th><th class="money">Total (LKR)</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div class="totals">
+        <p><span>Subtotal</span><strong>LKR ${escapeHtml(formatQuoteAmount(figures.subtotal))}</strong></p>
+        <p class="discount"><span>Special Discount (${percent}%)</span><strong>-LKR ${escapeHtml(formatQuoteAmount(figures.discount))}</strong></p>
+        <p><span>VAT (8%)</span><strong>LKR ${escapeHtml(formatQuoteAmount(figures.vat))}</strong></p>
+        <p class="grand"><span>Estimated Grand Total</span><strong>LKR ${escapeHtml(formatQuoteAmount(figures.grand))}</strong></p>
+      </div>
+      <h2>Terms and conditions</h2>
+      <p class="terms">${escapeHtml(quote.terms || "")}</p>
+    `,
+  });
 }
 
 export function paymentReceiptDocument(invoice) {

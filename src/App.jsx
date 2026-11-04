@@ -743,7 +743,7 @@ function accessCopy(role, pageId, access) {
     return "Payroll, expenses, and revenue. Paid payroll is included with expenses as salary.";
   }
   if (pageId === "marketing-projects") {
-    return "Marketing projects you created and marketing or Both projects from the project manager. Add milestones and employees here. Track progress on Tasks.";
+    return "Marketing projects you created and marketing or Both projects from the project manager. Add milestones and employees here. Content Plan Tracking updates the status of each post on the existing content plan.";
   }
   if (pageId === "marketing-tasks") {
     return "Open a project, then a milestone, then an employee board. Move checked work into Done. When every task on that milestone is in Done, the milestone is completed.";
@@ -775,10 +775,10 @@ function accessCopy(role, pageId, access) {
     return "Payments for your projects. They stay separate from the sales department.";
   }
   if (pageId === "projects" && role === "ceo") {
-    return "View only. Projects, quotations, sprints, milestones, and reports recorded by the project manager.";
+    return "View only. Projects, sprints, milestones, and reports recorded by the project manager.";
   }
   if (pageId === "projects" && access === "full") {
-    return "Projects created for approved clients. Add milestones and employees on the Milestones tab. Quotations lists sales quotations and the promised packages.";
+    return "Projects created for approved clients. Add milestones and employees on the Milestones tab.";
   }
   if (pageId === "team") {
     return "View only. Departments and employees registered by the CEO.";
@@ -858,7 +858,7 @@ function PageView({ pageId, access, ceoUsername }) {
   if (pageId === "marketing-issues") return <MarketingIssuesWorkspace />;
   if (pageId === "marketing") return <MarketingWorkspace access={access} />;
   if (pageId === "own-project-list") {
-    return <ProjectsWorkspace access="full" username={ceoUsername} showListTab showQuotations={false} showSalesFeed={false} own />;
+    return <ProjectsWorkspace access="full" username={ceoUsername} showListTab showSalesFeed={false} own />;
   }
   if (pageId === "own-leads") {
     return <SalesWorkspace access="full" username={ceoUsername} section="follow" personal />;

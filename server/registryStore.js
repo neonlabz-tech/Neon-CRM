@@ -92,12 +92,13 @@ async function highestSavedLeadNumber() {
   return highest;
 }
 
-function keptLeadIds(savedHighest, ids) {
+function keptLeadIds(savedHighest, ids, { keepReservations = true } = {}) {
   const keep = new Set();
   Object.keys(ids || {}).forEach((id) => {
     const number = codeNumber("LEAD-", id);
     if (number > 0 && number <= savedHighest) keep.add(formatCode("LEAD-", 4, number));
   });
+  if (!keepReservations) return keep;
   for (let number = savedHighest + 1; ; number += 1) {
     const id = formatCode("LEAD-", 4, number);
     if (!ids?.[id]) break;
@@ -128,7 +129,7 @@ export async function unionRegistryIds(incoming) {
   const normalized = normalizeRegistry(incoming);
   const registry = await readRegistry();
   const leadIds = { ...registry.leads.ids, ...normalized.leads.ids };
-  const keepLeads = keptLeadIds(savedLead, leadIds);
+  const keepLeads = keptLeadIds(savedLead, leadIds, { keepReservations: false });
   const set = {};
   const max = {};
   const unset = {};
@@ -326,13 +327,29 @@ export function restoreClonedLeads(incoming, stored) {
   return { ...incoming, leads, followUps: Array.isArray(stored?.followUps) ? stored.followUps : incoming.followUps };
 }
 
-export function assignUniqueLeadIds(data, floor = 0) {
+export function assignUniqueLeadIds(data, floor = 0, storedLeads = undefined) {
   if (!data || !Array.isArray(data.leads)) return data;
-  const seen = new Set();
+  const sequencingNewLeads = Array.isArray(storedLeads);
+  const stored = new Set();
   let max = Number(floor) || 0;
+  if (sequencingNewLeads) {
+    storedLeads.forEach((lead) => {
+      const number = codeNumber("LEAD-", lead?.id);
+      if (!number) return;
+      stored.add(formatCode("LEAD-", 4, number));
+      max = Math.max(max, number);
+    });
+  }
+  const seen = new Set();
   const leads = data.leads.map((lead) => {
     const number = codeNumber("LEAD-", lead?.id);
     const id = number ? formatCode("LEAD-", 4, number) : "";
+    if (sequencingNewLeads) {
+      if (id && stored.has(id)) return String(lead.id) === id ? lead : { ...lead, id };
+      max += 1;
+      const next = formatCode("LEAD-", 4, max);
+      return { ...lead, id: next };
+    }
     if (id && !seen.has(id)) {
       seen.add(id);
       max = Math.max(max, number);
@@ -363,24 +380,42 @@ export function assignUniqueLeadIds(data, floor = 0) {
   return { ...data, leads, followUps };
 }
 
-export async function syncSavedLeadIds(leads) {
+export async function syncSavedLeadIds(leads, preservedIds = []) {
   const set = {};
+  const saved = new Set();
   let sequence = 0;
-  (leads || []).forEach((lead) => {
-    const number = codeNumber("LEAD-", lead?.id);
-    if (!number) return;
+  const remember = (value) => {
+    const number = codeNumber("LEAD-", value);
+    if (!number) return "";
     const id = formatCode("LEAD-", 4, number);
+    saved.add(id);
     set[`data.leads.ids.${id}`] = true;
     sequence = Math.max(sequence, number);
-    const digits = phoneDigits(lead.phone);
-    if (digits.length === 10) set[`data.phones.${digits}`] = id;
+    return id;
+  };
+  (leads || []).forEach((lead) => {
+    const id = remember(lead?.id);
+    const digits = phoneDigits(lead?.phone);
+    if (id && digits.length === 10) set[`data.phones.${digits}`] = id;
   });
-  if (!Object.keys(set).length) return;
+  preservedIds.forEach((id) => remember(id));
   await ensureRegistry();
-  await Store.updateOne(
-    { key: REGISTRY_KEY, owner: COMPANY },
-    { $set: set, $max: { "data.leads.sequence": sequence } }
-  );
+  const registry = await readRegistry();
+  const unset = {};
+  Object.keys(registry.leads.ids || {}).forEach((id) => {
+    const number = codeNumber("LEAD-", id);
+    const canonical = number ? formatCode("LEAD-", 4, number) : "";
+    if (!saved.has(canonical)) unset[`data.leads.ids.${id}`] = "";
+  });
+  Object.entries(registry.phones || {}).forEach(([digits, holder]) => {
+    const number = codeNumber("LEAD-", holder);
+    const canonical = number ? formatCode("LEAD-", 4, number) : "";
+    if (canonical && !saved.has(canonical) && !set[`data.phones.${digits}`]) unset[`data.phones.${digits}`] = "";
+  });
+  const update = { $set: { ...set, "data.leads.sequence": sequence } };
+  if (Object.keys(unset).length) update.$unset = unset;
+  if (!Object.keys(set).length && !Object.keys(unset).length) return;
+  await Store.updateOne({ key: REGISTRY_KEY, owner: COMPANY }, update);
 }
 
 export async function releaseLeadPhone(leadId) {

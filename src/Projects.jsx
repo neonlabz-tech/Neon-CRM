@@ -10,7 +10,7 @@ import { sessionAccount } from "./scope.js";
 import { BackButton } from "./BackButton.jsx";
 import { applyClientQuote, clientsWithPaying, interestedServiceType, loadIncomingProjects, loadSales, projectTypeFromQuote, quoteForClientRecord, salesClientByName, salesClientDirectory, startedPaymentClients } from "./sales.js";
 import { ReportsWorkspace } from "./Reports.jsx";
-import { ProjectPackagesBoard, PromisedPackagePanel } from "./Sales.jsx";
+import { PromisedPackagePanel } from "./Sales.jsx";
 import { publishClients } from "./clientSync.js";
 import {
   blankMeeting,
@@ -71,7 +71,7 @@ const MILESTONE_STATUS = {
   done: "Done",
 };
 
-export function ProjectsWorkspace({ access, username, showListTab = true, showQuotations = true, showSalesFeed, own = false }) {
+export function ProjectsWorkspace({ access, username, showListTab = true, showSalesFeed, own = false }) {
   const canEdit = access === "full";
   const salesFeed = own ? false : (showSalesFeed ?? showListTab);
   const showReports = own || !canEdit;
@@ -91,7 +91,6 @@ export function ProjectsWorkspace({ access, username, showListTab = true, showQu
       {canEdit ? null : <p className="banner">Project records are view only from this account.</p>}
       <div className="subnav">
         {showListTab ? <button type="button" className={tab === "projects" ? "active" : ""} onClick={() => setTab("projects")}>Projects</button> : null}
-        {showQuotations ? <button type="button" className={tab === "quotations" ? "active" : ""} onClick={() => setTab("quotations")}>Quotations</button> : null}
         <button type="button" className={tab === "sprints" ? "active" : ""} onClick={() => setTab("sprints")}>Sprints</button>
         <button type="button" className={tab === "milestones" ? "active" : ""} onClick={() => setTab("milestones")}>Milestones</button>
         {showReports ? (
@@ -100,13 +99,6 @@ export function ProjectsWorkspace({ access, username, showListTab = true, showQu
       </div>
       {tab === "projects" ? <ProjectPage data={data} commit={commit} canEdit={canEdit} username={username} own={own} /> : null}
       {salesFeed && tab === "projects" ? <SalesProjects /> : null}
-      {showQuotations && tab === "quotations" ? (
-        <ProjectPackagesBoard
-          projects={data.projects.filter((project) => !project.archived)}
-          clients={loadClients()}
-          hideAmounts
-        />
-      ) : null}
       {tab === "sprints" ? <SprintPage data={data} commit={commit} canEdit={canEdit} /> : null}
       {tab === "milestones" ? <MilestonePage data={data} commit={commit} canEdit={canEdit} username={username} own={own} /> : null}
       {tab === "reports" ? <ReportsWorkspace canEdit={own && canEdit} projects={data.projects} /> : null}

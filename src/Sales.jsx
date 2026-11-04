@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import neonLogo from "./assets/neonlabz-logo.png";
 import { loadClients } from "./clients.js";
 import { api } from "./api.js";
-import { crmStorage } from "./storage.js";
+import { crmStorage, flushStores } from "./storage.js";
 import { dataOwner, sessionAccount } from "./scope.js";
 import { loadUsers } from "./crm.js";
 import { dismissNotice, loadFinance, loadNotices, projectInvoiceById, projectInvoiceFor } from "./finance.js";
@@ -1725,6 +1725,8 @@ function ConfirmedCeoQuotes({ username }) {
 function FollowUpPanel({ data, commit, canEdit, executives, username, month, allowDelete = false }) {
   const today = todayISO();
   const csvInput = useRef(null);
+  const alive = useRef(true);
+  const [importing, setImporting] = useState(false);
   const [query, setQuery] = useState("");
   const [notice, setNotice] = useState("");
   const [status, setStatus] = useState("");
@@ -1732,6 +1734,12 @@ function FollowUpPanel({ data, commit, canEdit, executives, username, month, all
   const [open, setOpen] = useState(null);
   const [removing, setRemoving] = useState(null);
   const [error, setError] = useState("");
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
   const leads = data.leads || [];
   const canRemove = canEdit && allowDelete;
   const rows = sortLeadsById(leads.filter((lead) => {
@@ -1797,30 +1805,54 @@ function FollowUpPanel({ data, commit, canEdit, executives, username, month, all
                 onChange={(event) => {
                   const file = event.target.files?.[0];
                   event.target.value = "";
-                  if (!file) return;
+                  if (!file || importing) return;
+                  setImporting(true);
+                  setNotice("");
+                  setError("");
                   const reader = new FileReader();
+                  reader.onerror = () => {
+                    if (!alive.current) return;
+                    setImporting(false);
+                    setError("The CSV file could not be read.");
+                  };
                   reader.onload = () => {
-                    const result = importLeadsFromCsv(data, String(reader.result || ""), {
-                      executive: defaultExecutive(executives, username),
-                    });
-                    if (!result.ok) {
-                      setNotice("");
-                      setError(result.error);
-                      return;
-                    }
-                    const stored = commit(result.data);
-                    if (stored) {
-                      setNotice("");
-                      setError(stored);
-                      return;
-                    }
-                    setError("");
-                    setNotice(result.message);
+                    window.setTimeout(() => {
+                        void (async () => {
+                          try {
+                            const result = importLeadsFromCsv(data, String(reader.result || ""), {
+                              executive: defaultExecutive(executives, username),
+                            });
+                            if (!alive.current) return;
+                            if (!result.ok) {
+                              setNotice("");
+                              setError(result.error);
+                              return;
+                            }
+                            const stored = commit(result.data);
+                            if (!alive.current) return;
+                            if (stored) {
+                              setNotice("");
+                              setError(stored);
+                              return;
+                            }
+                            await flushStores();
+                            if (!alive.current) return;
+                            setError("");
+                            setNotice(result.message);
+                          } catch {
+                            if (!alive.current) return;
+                            setNotice("");
+                            setError("The CSV could not be imported.");
+                          } finally {
+                            if (alive.current) setImporting(false);
+                          }
+                        })();
+                    }, 50);
                   };
                   reader.readAsText(file);
                 }}
               />
-              <button className="ghost" type="button" title="Columns: Date, Business / Customer, Phone, Source, Interested Service, Lead Status, Business Type, Address, Email" onClick={() => csvInput.current?.click()}>Import CSV</button>
+              <button className="ghost" type="button" title="Columns: Date, Business / Customer, Phone, Source, Interested Service, Lead Status, Business Type, Address, Email" disabled={importing} onClick={() => csvInput.current?.click()}>{importing ? "Importing…" : "Import CSV"}</button>
               <button className="primary" type="button" onClick={() => { setOpen(blankLead(defaultExecutive(executives, username), month, reserveNextLeadId())); setError(""); setNotice(""); }}>
                 + Add lead
               </button>
@@ -1840,6 +1872,7 @@ function FollowUpPanel({ data, commit, canEdit, executives, username, month, all
             {LEAD_SOURCES.map((item) => <option key={item}>{item}</option>)}
           </select>
         </div>
+        {importing ? <p className="form-note" role="status" aria-live="polite">Importing CSV. Please wait until the leads are saved.</p> : null}
         {error ? <p className="form-error">{error}</p> : null}
         {notice ? <p className="form-note">{notice}</p> : null}
         {rows.length === 0 ? (

@@ -229,6 +229,15 @@ export function srsDocument(srs, projectLabel = "") {
   const extra = (srs.sections || []).map((section) => textBlock(section.heading || "Section", section.body)).join("");
   return wrapLetterhead({
     title: srs.title || "SRS",
+    cover: {
+      title: srs.title || "Software Requirements Specification",
+      preparedFor: srs.preparedFor || "Client",
+      period: projectLabel,
+      department: "Projects",
+      source: "Software requirements",
+      date: srs.date,
+      preparedBy: "Neon Labz",
+    },
     body: joinHtml([
       `<p class="kicker">Software Requirements Specification</p>`,
       `<h1>${escapeHtml(srs.title || "SRS")}</h1>`,
@@ -318,6 +327,15 @@ export function proposalDocument(proposal) {
 
   return wrapLetterhead({
     title: proposal.title || "Proposal",
+    cover: {
+      title: proposal.title || "Proposal",
+      preparedFor: proposal.preparedFor || "Client",
+      period: proposal.subtitle || "",
+      department: "Projects",
+      source: "Client proposal",
+      date: proposal.date,
+      preparedBy: "Neon Labz",
+    },
     extraCss: ".stats{display:flex;gap:18px}.stats strong{display:block;font-size:20px}.pack{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-top:12px}",
     body: joinHtml([
       `<p class="kicker">Client proposal</p>`,

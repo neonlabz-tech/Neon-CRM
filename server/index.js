@@ -929,15 +929,18 @@ export function createApp() {
         const existing = await Store.findOne({ key: item.key, owner: item.owner }).lean();
         const current = existing?.data && typeof existing.data === "object" ? existing.data : {};
         const others = await Store.find({ key: "neon-crm-sales", owner: { $ne: item.owner } }).select("data.leads.id").lean();
+        const otherLeadIds = [];
         const floor = others.reduce((max, doc) => {
           (doc.data?.leads || []).forEach((lead) => {
             const number = Number(String(lead?.id || "").replace(/\D/g, ""));
+            if (lead?.id) otherLeadIds.push(lead.id);
             if (number > max) max = number;
           });
           return max;
         }, 0);
         data = restoreClonedLeads(data, current);
-        data = assignUniqueLeadIds(data, floor);
+        data = assignUniqueLeadIds(data, floor, current.leads || []);
+        await syncSavedLeadIds(data.leads, otherLeadIds);
         if (req.user.role === "sales" && item.owner === req.user.username) {
           data = {
             ...data,
@@ -946,7 +949,6 @@ export function createApp() {
             rates: current.rates && typeof current.rates === "object" ? current.rates : data.rates,
           };
         }
-        await syncSavedLeadIds(data.leads);
       }
       await Store.findOneAndUpdate(
         { key: item.key, owner: item.owner },

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { minSelectableDate } from "./sales.js";
 import { createPortal } from "react-dom";
 import { BackButton } from "./BackButton.jsx";
@@ -22,12 +22,16 @@ import {
   periodLabel,
   planFileName,
   planHtml,
+  plansForProject,
+  postStatusLabel,
+  postTypeLabel,
   platformHasData,
   REPORT_PLATFORMS,
   reportFileName,
   reportHtml,
   reportPlatformsLabel,
   saveMarketing,
+  savePlanPostStatus,
   weekday,
 } from "./marketing.js";
 import { marketingFieldsFromPm, marketingServiceClients, publishClients, pushMarketingToPm, visibleMarketingClients } from "./clientSync.js";
@@ -36,7 +40,6 @@ import { EMAIL_ERROR, PHONE_ERROR, emailError, formatPhone, phoneError, teamMemb
 import { KanbanBoard } from "./Kanban.jsx";
 import { claimProjectCode } from "./registry.js";
 import { assignMarketingTeam, blankMilestone, canonicalProjectCode, canManageDepartment, companyProjectCodes, deleteMarketingMilestone, linkedProjectForClient, marketingProjects, milestoneDepartment, milestoneTasksComplete, normalizeAssignees, projectCodeTaken, removeMarketingProjectFromDoc, saveMarketingMilestone, saveMarketingProjectDates, suggestCompanyProjectCode, syncOwnerProjectProgress, todayIso, upsertMarketingProjectFromDoc } from "./projects.js";
-import { ProjectPackagesBoard } from "./Sales.jsx";
 import { BOARD_COLUMNS, TASK_PRIORITIES, TASK_STATUSES, blankTask, cleanHtml, employeeLaneStatus, managerBoardColumns, nextTaskCode, saveOwnerTasks, stampTaskStatus, tasksForOwner } from "./tasks.js";
 import { sessionAccount } from "./scope.js";
 
@@ -538,10 +541,10 @@ export function ProjectMaintenance({ canEdit }) {
       <div className="subnav" role="tablist">
         <button type="button" className={section === "projects" ? "active" : ""} onClick={() => setSection("projects")}>Projects</button>
         <button type="button" className={section === "milestones" ? "active" : ""} onClick={() => setSection("milestones")}>Milestones</button>
-        <button type="button" className={section === "quotations" ? "active" : ""} onClick={() => setSection("quotations")}>Quotations</button>
+        <button type="button" className={section === "tracking" ? "active" : ""} onClick={() => setSection("tracking")}>Content Plan Tracking</button>
       </div>
-      {section === "quotations" ? (
-        <ProjectPackagesBoard projects={projects} types={["marketing", "both"]} hideAmounts allowView={false} />
+      {section === "tracking" ? (
+        <ContentPlanTracking canEdit={canEdit} />
       ) : section === "milestones" ? (
         <MilestoneBoard
           projects={projects}
@@ -643,6 +646,175 @@ export function ProjectMaintenance({ canEdit }) {
           onSave={assign}
         />
       ) : null}
+    </div>
+  );
+}
+
+function trackingPosts(plans) {
+  return plans.flatMap((plan) => (plan.months || []).flatMap((month) => month.posts || []));
+}
+
+function trackingCounts(posts) {
+  const completed = posts.filter((post) => postStatusLabel(post.status) === "Completed").length;
+  const total = posts.length;
+  return {
+    total,
+    completed,
+    pending: total - completed,
+    percent: total === 0 ? 0 : Math.round((completed / total) * 100),
+  };
+}
+
+function ContentPlanTracking({ canEdit }) {
+  const [revision, setRevision] = useState(0);
+  const [selectedKey, setSelectedKey] = useState("");
+  const [error, setError] = useState("");
+  const projects = useMemo(() => marketingProjects(), [revision]);
+  const marketing = useMemo(() => loadMarketing(), [revision]);
+  const selected = projects.find((project) => `${project.owner}:${project.id}` === selectedKey) || null;
+
+  function updateStatus(planId, monthId, postId, status) {
+    const result = savePlanPostStatus(planId, monthId, postId, status);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    setError("");
+    setRevision((value) => value + 1);
+  }
+
+  if (selected) {
+    const plans = plansForProject(selected, marketing);
+    const summary = trackingCounts(trackingPosts(plans));
+    return (
+      <div className="track-page">
+        <header className="track-hero">
+          <BackButton onClick={() => { setSelectedKey(""); setError(""); }} label="All projects" />
+          <div className="track-hero-top">
+            <div className="track-identity">
+              <p className="kicker">{selected.code || "No ID"}</p>
+              <h2>{selected.name}</h2>
+              <p>{selected.client || "Client"}</p>
+            </div>
+            <div className="track-metrics" aria-label="Content plan progress">
+              <div className="track-metric">
+                <span>Posts</span>
+                <strong>{summary.total}</strong>
+              </div>
+              <div className="track-metric is-done">
+                <span>Completed</span>
+                <strong>{summary.completed}</strong>
+              </div>
+              <div className="track-metric is-pending">
+                <span>Pending</span>
+                <strong>{summary.pending}</strong>
+              </div>
+            </div>
+          </div>
+          <div className="track-progress-row">
+            <span>{summary.percent}% complete</span>
+            <div className="progress-track" aria-hidden="true">
+              <span style={{ width: `${summary.percent}%` }} />
+            </div>
+          </div>
+        </header>
+        {error ? <p className="form-error">{error}</p> : null}
+        {plans.length === 0 ? (
+          <article className="panel"><p className="empty-copy">No content plan has been created for this project.</p></article>
+        ) : plans.map((plan) => (
+          <article className="track-plan" key={plan.id}>
+            <header className="track-plan-head">
+              <h3>{plan.title || "Content plan"}</h3>
+              <p>{periodLabel(plan.startDate, plan.endDate)}</p>
+            </header>
+            {(plan.months || []).map((month, index) => {
+              const posts = month.posts || [];
+              const monthCounts = trackingCounts(posts);
+              return (
+                <section key={month.id} className="track-month">
+                  <header className="track-month-head">
+                    <span className="track-month-index">{String(index + 1).padStart(2, "0")}</span>
+                    <div>
+                      <h4>{month.label || "Month"}{month.theme ? ` · ${month.theme}` : ""}</h4>
+                      <small>{periodLabel(month.startDate, month.endDate)}</small>
+                    </div>
+                    <p className="track-month-count">{monthCounts.completed} of {monthCounts.total} done</p>
+                  </header>
+                  <div className="track-table-wrap">
+                    <table className="track-table">
+                      <thead>
+                        <tr>
+                          <th>Date</th>
+                          <th>Day</th>
+                          <th>Time</th>
+                          <th>Topic</th>
+                          <th>Type</th>
+                          <th>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {posts.length === 0 ? (
+                          <tr><td className="track-empty" colSpan={6}>No posts in this month.</td></tr>
+                        ) : posts.map((post) => {
+                          const status = postStatusLabel(post.status);
+                          const type = postTypeLabel(post.type);
+                          return (
+                            <tr key={post.id}>
+                              <td>{formatDate(post.date) || "—"}</td>
+                              <td>{weekday(post.date) || "—"}</td>
+                              <td>{formatTime(post.time) || "—"}</td>
+                              <td>{post.topic || "Untitled"}</td>
+                              <td><span className={`track-type ${type === "Reel" ? "is-reel" : "is-poster"}`}>{type}</span></td>
+                              <td>
+                                <select
+                                  className={`track-status ${status === "Completed" ? "is-done" : "is-pending"}`}
+                                  aria-label={`Status for ${post.topic || "post"}`}
+                                  value={status}
+                                  disabled={!canEdit}
+                                  onChange={(event) => updateStatus(plan.id, month.id, post.id, event.target.value)}
+                                >
+                                  <option>Pending</option>
+                                  <option>Completed</option>
+                                </select>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              );
+            })}
+          </article>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div className="track-page">
+      <p className="track-intro">Open a project to update the status of each post on its content plan.</p>
+      {projects.length === 0 ? <article className="panel"><p className="empty-copy">No marketing projects yet.</p></article> : (
+        <div className="track-list">
+          {projects.map((project) => {
+            const plans = plansForProject(project, marketing);
+            const counts = trackingCounts(trackingPosts(plans));
+            return (
+              <button className="track-card" type="button" key={`${project.owner}:${project.id}`} onClick={() => setSelectedKey(`${project.owner}:${project.id}`)}>
+                <span className="project-mark">{projectInitials(project.name)}</span>
+                <span>
+                  <strong>{project.name}</strong>
+                  <small>{project.code || "No ID"} · {project.client || "Client"}</small>
+                </span>
+                <span className="track-card-meta">
+                  {plans.length === 0 ? "No plan" : `${counts.completed} of ${counts.total} done`}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -1475,9 +1647,20 @@ function ContentPlans({ data, commit, canEdit }) {
     }
     if (plan.endDate < plan.startDate) return "The end date is before the start date.";
     const exists = data.plans.some((item) => item.id === plan.id);
+    const saved = {
+      ...plan,
+      months: (plan.months || []).map((month) => ({
+        ...month,
+        posts: (month.posts || []).map((post) => ({
+          ...post,
+          type: postTypeLabel(post.type),
+          status: postStatusLabel(post.status),
+        })),
+      })),
+    };
     commit({
       ...data,
-      plans: exists ? data.plans.map((item) => (item.id === plan.id ? plan : item)) : [plan, ...data.plans],
+      plans: exists ? data.plans.map((item) => (item.id === saved.id ? saved : item)) : [saved, ...data.plans],
     });
     setEditing(null);
     return "";
@@ -1628,7 +1811,6 @@ function PlanEditor({ plan, clients, onCancel, onSave }) {
                     <th>Time</th>
                     <th>Topic</th>
                     <th>Type</th>
-                    <th>Goal</th>
                     <th></th>
                   </tr>
                 </thead>
@@ -1640,12 +1822,11 @@ function PlanEditor({ plan, clients, onCancel, onSave }) {
                       <td><input type="time" value={post.time} aria-label="Post time" onChange={(event) => updateMonth(month.id, (item) => ({ ...item, posts: item.posts.map((row) => row.id === post.id ? { ...row, time: event.target.value } : row) }))} /></td>
                       <td><input value={post.topic} aria-label="Topic" onChange={(event) => updateMonth(month.id, (item) => ({ ...item, posts: item.posts.map((row) => row.id === post.id ? { ...row, topic: event.target.value } : row) }))} /></td>
                       <td>
-                        <select value={post.type} aria-label="Type" onChange={(event) => updateMonth(month.id, (item) => ({ ...item, posts: item.posts.map((row) => row.id === post.id ? { ...row, type: event.target.value } : row) }))}>
-                          <option>Image</option>
-                          <option>Video</option>
+                        <select value={postTypeLabel(post.type)} aria-label="Type" onChange={(event) => updateMonth(month.id, (item) => ({ ...item, posts: item.posts.map((row) => row.id === post.id ? { ...row, type: event.target.value } : row) }))}>
+                          <option>Poster</option>
+                          <option>Reel</option>
                         </select>
                       </td>
-                      <td><input value={post.goal} aria-label="Goal" onChange={(event) => updateMonth(month.id, (item) => ({ ...item, posts: item.posts.map((row) => row.id === post.id ? { ...row, goal: event.target.value } : row) }))} /></td>
                       <td>
                         <button className="ghost" type="button" onClick={() => updateMonth(month.id, (item) => ({ ...item, posts: item.posts.filter((row) => row.id !== post.id) }))}>
                           Remove
@@ -1707,7 +1888,7 @@ function PlanRead({ plan, clientName }) {
           <ul>
             {month.posts.map((post) => (
               <li key={post.id}>
-                {formatDate(post.date) || "Date not set"} {weekday(post.date)} {formatTime(post.time)} — {post.topic || "Untitled"} ({post.type}, {post.goal || "no goal"})
+                {formatDate(post.date) || "Date not set"} {weekday(post.date)} {formatTime(post.time)} — {post.topic || "Untitled"} ({postTypeLabel(post.type)})
               </li>
             ))}
           </ul>
@@ -1967,6 +2148,14 @@ function ReportDialog({ report, mode, clients, onClose, onSave }) {
               <Field label="Video performance" type="area" value={stats.videoNote} onChange={(value) => setStat("videoNote", value)} />
             </section>
             <section className="block">
+              <h2>Final analysis</h2>
+              <p className="hint">Upload screenshots for {REPORT_PLATFORMS.find((item) => item.id === activePlatform)?.label}. You can add as many images as you need.</p>
+              <AnalysisImages
+                images={stats.analysisImages || []}
+                onChange={(images) => setStat("analysisImages", images)}
+              />
+            </section>
+            <section className="block">
               <h2>Insights and client summary</h2>
               <div className="action-list">
                 {draft.nextActions.map((action, index) => (
@@ -2005,6 +2194,110 @@ function ReportDialog({ report, mode, clients, onClose, onSave }) {
         )}
       </div>
     </Modal>
+  );
+}
+
+function readAnalysisImage(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Could not read that image."));
+    reader.onload = () => {
+      const image = new Image();
+      image.onload = () => {
+        const max = 1280;
+        const scale = Math.min(1, max / Math.max(image.width, image.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(image.width * scale));
+        canvas.height = Math.max(1, Math.round(image.height * scale));
+        const context = canvas.getContext("2d");
+        context.fillStyle = "#ffffff";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
+        resolve({
+          id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+          name: file.name || "Image",
+          src: canvas.toDataURL("image/jpeg", 0.82),
+        });
+      };
+      image.onerror = () => reject(new Error("Could not read that image."));
+      image.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function AnalysisImages({ images, onChange }) {
+  const inputRef = useRef(null);
+  const [preview, setPreview] = useState(null);
+  const [error, setError] = useState("");
+
+  async function addFiles(fileList) {
+    const files = [...(fileList || [])];
+    if (!files.length) return;
+    const rejected = files.some((file) => !String(file.type || "").startsWith("image/"));
+    const accepted = files.filter((file) => String(file.type || "").startsWith("image/"));
+    setError(rejected ? "Only image files can be uploaded." : "");
+    const next = [];
+    for (const file of accepted) {
+      try {
+        next.push(await readAnalysisImage(file));
+      } catch {
+        setError("One of the images could not be read.");
+      }
+    }
+    if (next.length) onChange([...(images || []), ...next]);
+  }
+
+  return (
+    <div className="analysis-upload">
+      <button
+        className="analysis-drop"
+        type="button"
+        onClick={() => inputRef.current?.click()}
+        onDragOver={(event) => event.preventDefault()}
+        onDrop={(event) => {
+          event.preventDefault();
+          addFiles(event.dataTransfer.files);
+        }}
+      >
+        <strong>Upload images</strong>
+        <span>Click to choose images, or drop them here. There is no upload limit.</span>
+      </button>
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        hidden
+        onChange={(event) => {
+          addFiles(event.target.files);
+          event.target.value = "";
+        }}
+      />
+      {error ? <p className="form-error">{error}</p> : null}
+      {images?.length ? (
+        <div className="analysis-grid">
+          {images.map((image) => (
+            <figure key={image.id}>
+              <button type="button" onClick={() => setPreview(image)} aria-label={`Preview ${image.name || "image"}`}>
+                <img src={image.src} alt={image.name || "Final analysis"} />
+              </button>
+              <figcaption>{image.name || "Image"}</figcaption>
+              <button type="button" onClick={() => onChange(images.filter((item) => item.id !== image.id))}>Remove</button>
+            </figure>
+          ))}
+        </div>
+      ) : <p className="empty-copy">No images uploaded for this platform yet.</p>}
+      {preview ? (
+        <div className="analysis-lightbox" onClick={() => setPreview(null)} role="presentation">
+          <figure onClick={(event) => event.stopPropagation()}>
+            <img src={preview.src} alt={preview.name || "Final analysis"} />
+            <figcaption>{preview.name || "Image"}</figcaption>
+            <button type="button" onClick={() => setPreview(null)}>Close preview</button>
+          </figure>
+        </div>
+      ) : null}
+    </div>
   );
 }
 

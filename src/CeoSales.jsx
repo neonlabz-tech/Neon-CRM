@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { formatPhone } from "./hrms.js";
+import { wrapLetterhead } from "./letterhead.js";
 import { ScopeHtml } from "./ScopeEditor.jsx";
 import {
   CALL_OUTCOMES,
@@ -1402,21 +1403,28 @@ function exportLeads(rows, scope) {
   const ownerLabel = scope.owner ? salesStaffName(scope.owner) : "All Sales Executives";
   const popup = window.open("", "_blank");
   if (!popup) return;
-  popup.document.write(`<!doctype html><html><head><title>NeonLabz Lead Register</title><style>
-    @page{size:A4 landscape;margin:12mm}
-    body{font:11px Arial;color:#1A2042;margin:20px}
-    h1{background:#131937;color:white;padding:18px;font-size:21px;margin:0}
-    p{color:#5C6380}
-    table{width:100%;border-collapse:collapse;table-layout:fixed}
-    th{background:#F5F6FC;text-align:left;color:#1A2042}
-    th,td{border:1px solid #dce2ee;padding:7px 5px;overflow-wrap:anywhere}
-    tr:nth-child(even){background:#f7f8fd}
-  </style></head><body>
-    <h1>NEONLABZ | CEO LEAD REGISTER</h1>
-    <p>${escapeHtml(scope.from)} to ${escapeHtml(scope.to)} · ${escapeHtml(ownerLabel)} · ${rows.length} leads · Generated ${escapeHtml(todayISO())}</p>
-    <table><thead><tr>${heads.map((head) => `<th>${escapeHtml(head)}</th>`).join("")}</tr></thead>
-    <tbody>${vals.map((row) => `<tr>${row.map((value) => `<td>${escapeHtml(value)}</td>`).join("")}</tr>`).join("")}</tbody></table>
-    <script>window.onload=()=>setTimeout(()=>window.print(),250)<\\/script>
-  </body></html>`);
+  popup.document.write(wrapLetterhead({
+    title: "Lead register",
+    cover: {
+      title: "CEO lead register",
+      preparedFor: ownerLabel,
+      period: `${scope.from} to ${scope.to}`,
+      department: "Sales",
+      source: "Lead register",
+      date: todayISO(),
+      preparedBy: "Neon Labz",
+    },
+    extraCss: "table{table-layout:fixed} td,th{font-size:10px;overflow-wrap:anywhere}",
+    body: `
+      <p class="kicker">Lead register</p>
+      <h1>CEO lead register</h1>
+      <p class="meta">${escapeHtml(scope.from)} to ${escapeHtml(scope.to)} · ${escapeHtml(ownerLabel)} · ${rows.length} leads</p>
+      <table>
+        <thead><tr>${heads.map((head) => `<th>${escapeHtml(head)}</th>`).join("")}</tr></thead>
+        <tbody>${vals.map((row) => `<tr>${row.map((value) => `<td>${escapeHtml(value)}</td>`).join("")}</tr>`).join("")}</tbody>
+      </table>
+    `,
+  }));
   popup.document.close();
+  popup.onload = () => setTimeout(() => popup.print(), 300);
 }

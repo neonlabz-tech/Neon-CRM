@@ -369,9 +369,6 @@ function ProjectWork({ project, code, person, onBack }) {
           <p className="kicker">{liveProject.owner} · {liveProject.code || "Project"}</p>
           <h2>{liveProject.name}</h2>
         </div>
-        {openMilestones.length ? (
-          <button className="primary" type="button" onClick={() => setEditing(blankTask(liveProject.id, openMilestones[0].id))}>Add task</button>
-        ) : null}
       </div>
       {error ? <p className="form-error">{error}</p> : null}
       {milestones.length === 0 ? (

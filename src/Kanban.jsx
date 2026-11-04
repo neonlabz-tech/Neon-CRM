@@ -67,7 +67,7 @@ export function KanbanBoard({
           </div>
         </div>
       ) : null}
-      <div className="kb" style={{ gridTemplateColumns: `repeat(${columns.length}, minmax(min(240px, 78vw), 1fr))` }}>
+      <div className="kb" style={{ "--kb-cols": columns.length }}>
         {columns.map((column) => {
           const rows = tasks.filter((task) => boardColumnOf(task) === column.id);
           const finished = column.id === "done" || column.id === "completed";
