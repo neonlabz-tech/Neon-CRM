@@ -18,7 +18,7 @@ let memory = new Map();
 let users = [];
 const dirty = new Set();
 let flushTimer = 0;
-let flushing = false;
+let tail = Promise.resolve();
 
 function parseKey(fullKey) {
   const value = String(fullKey || "");
@@ -42,11 +42,16 @@ function scheduleFlush() {
   }, 250);
 }
 
-export async function flushStores() {
-  if (flushing || dirty.size === 0) return;
+export function flushStores() {
+  const job = tail.then(drain);
+  tail = job.then(() => undefined, () => undefined);
+  return job;
+}
+
+async function drain() {
+  if (dirty.size === 0) return true;
   const keys = [...dirty];
   dirty.clear();
-  flushing = true;
   try {
     const saved = await api("/api/stores/batch", {
       method: "PUT",
@@ -66,15 +71,16 @@ export async function flushStores() {
     });
     const skipped = new Set((saved.rejected || []).map((item) => storeKey(item.key, item.owner)));
     skipped.forEach((key) => dirty.delete(key));
+    if (dirty.size) return drain();
+    return true;
   } catch (error) {
     const skipped = new Set((error.rejected || []).map((item) => storeKey(item.key, item.owner)));
     keys.forEach((key) => {
       if (!skipped.has(key)) dirty.add(key);
     });
     console.error("Could not save CRM data.", error);
-  } finally {
-    flushing = false;
-    if (dirty.size) scheduleFlush();
+    scheduleFlush();
+    return false;
   }
 }
 

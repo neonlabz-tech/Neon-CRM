@@ -14,6 +14,7 @@ import { scopeHasText } from "./richText.js";
 import { packageDocumentFromItem } from "./brandDocument.js";
 import { downloadDocumentPdf } from "./downloadPdf.js";
 import { formatPhone } from "./hrms.js";
+import { forgetLeadPhone } from "./registry.js";
 import { MonthField, monthLabel, reportingLabel } from "./ReportPeriod.jsx";
 import { companyProjects, loadProjects } from "./projects.js";
 import {
@@ -1722,6 +1723,15 @@ function ConfirmedCeoQuotes({ username }) {
   );
 }
 
+function decodeCsvBuffer(buffer) {
+  const bytes = buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : new Uint8Array();
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return new TextDecoder("windows-1252").decode(bytes);
+  }
+}
+
 function FollowUpPanel({ data, commit, canEdit, executives, username, month, allowDelete = false }) {
   const today = todayISO();
   const csvInput = useRef(null);
@@ -1819,7 +1829,7 @@ function FollowUpPanel({ data, commit, canEdit, executives, username, month, all
                     window.setTimeout(() => {
                         void (async () => {
                           try {
-                            const result = importLeadsFromCsv(data, String(reader.result || ""), {
+                            const result = importLeadsFromCsv(data, decodeCsvBuffer(reader.result), {
                               executive: defaultExecutive(executives, username),
                             });
                             if (!alive.current) return;
@@ -1835,21 +1845,31 @@ function FollowUpPanel({ data, commit, canEdit, executives, username, month, all
                               setError(stored);
                               return;
                             }
-                            await flushStores();
+                            const saved = await flushStores();
                             if (!alive.current) return;
+                            if (saved === false) {
+                              const previous = new Set((data.leads || []).map((lead) => lead.id));
+                              (result.data.leads || []).forEach((lead) => {
+                                if (lead?.id && !previous.has(lead.id)) forgetLeadPhone(lead.id);
+                              });
+                              commit(data);
+                              setNotice("");
+                              setError("The leads could not be saved. Import the CSV again.");
+                              return;
+                            }
                             setError("");
                             setNotice(result.message);
-                          } catch {
+                          } catch (error) {
                             if (!alive.current) return;
                             setNotice("");
-                            setError("The CSV could not be imported.");
+                            setError(error?.message || "The CSV could not be imported.");
                           } finally {
                             if (alive.current) setImporting(false);
                           }
                         })();
                     }, 50);
                   };
-                  reader.readAsText(file);
+                  reader.readAsArrayBuffer(file);
                 }}
               />
               <button className="ghost" type="button" title="Columns: Date, Business / Customer, Phone, Source, Interested Service, Lead Status, Business Type, Address, Email" disabled={importing} onClick={() => csvInput.current?.click()}>{importing ? "Importing…" : "Import CSV"}</button>

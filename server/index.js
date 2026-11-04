@@ -21,6 +21,7 @@ import {
   leadPhoneOwner,
   releaseLeadPhone,
   reserveLeadPhone,
+  syncSavedClientCodes,
   syncSavedLeadIds,
   unionRegistryIds,
 } from "./registryStore.js";
@@ -940,6 +941,12 @@ export function createApp() {
         }, 0);
         data = restoreClonedLeads(data, current);
         data = assignUniqueLeadIds(data, floor, current.leads || []);
+        if (Array.isArray(data.leads)) {
+          data = {
+            ...data,
+            leads: data.leads.map((lead) => (lead?.status === "Converted" ? lead : { ...lead, clientCode: "" })),
+          };
+        }
         await syncSavedLeadIds(data.leads, otherLeadIds);
         if (req.user.role === "sales" && item.owner === req.user.username) {
           data = {
@@ -955,6 +962,9 @@ export function createApp() {
         { key: item.key, owner: item.owner, data },
         { upsert: true, setDefaultsOnInsert: true }
       );
+    }
+    if (accepted.some((item) => item.key === "neon-crm-sales" || item.key === "neon-crm-clients" || item.key === REGISTRY_KEY)) {
+      await syncSavedClientCodes();
     }
     if (accepted.length) {
       await writeAudit(req.user.username, "stores.saved", {

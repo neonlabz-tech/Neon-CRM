@@ -1,6 +1,6 @@
 import { wrapLetterhead } from "./letterhead.js";
 import { blankClient, loadClients, nextClientCode, saveClients } from "./clients.js";
-import { claimClientCode, forgetLeadPhone, leadPhoneHolder, noteClientCode, noteLeadId, rememberLeadPhone, syncLeadPhones } from "./registry.js";
+import { claimClientCode, forgetLeadPhone, leadPhoneHolder, noteClientCode, noteClientCodes, noteLeadIds, rememberLeadPhone, syncLeadPhones } from "./registry.js";
 import { formatScopeHtml, sanitizeScopeHtml, scopeHasText } from "./richText.js";
 import { loadUsers } from "./crm.js";
 import { invoiceDocumentFromPayment, invoiceDocumentFromQuote } from "./brandDocument.js";
@@ -769,7 +769,7 @@ function directoryLeads() {
 
 function publishLeadDirectory() {
   const harvested = harvestLeadIndex();
-  Object.keys(harvested.ids).forEach((id) => noteLeadId(id));
+  noteLeadIds(Object.keys(harvested.ids));
   syncLeadPhones(harvested.phones);
   saveLeadIndex({
     sequence: harvested.sequence,
@@ -1298,11 +1298,19 @@ export function successfulPaymentClients(followUps) {
   return convertedPaymentClients({ followUps, leads: [], quotes: [] });
 }
 
+function clientCodeNumber(code) {
+  const match = /^CLI(\d+)$/i.exec(String(code || "").trim());
+  return match ? Number(match[1]) : 0;
+}
+
 export function convertedClients(data) {
   return (data?.leads || [])
     .filter((lead) => lead.status === "Converted" && String(lead.business || "").trim())
     .slice()
-    .sort((a, b) => a.business.localeCompare(b.business));
+    .sort((a, b) => {
+      const byCode = (clientCodeNumber(a.clientCode) || Number.MAX_SAFE_INTEGER) - (clientCodeNumber(b.clientCode) || Number.MAX_SAFE_INTEGER);
+      return byCode || leadIdNumber(a.id) - leadIdNumber(b.id) || a.business.localeCompare(b.business);
+    });
 }
 
 export function convertedPaymentClients(data) {
@@ -1334,23 +1342,39 @@ export function convertedPaymentClients(data) {
     }));
 }
 
-function nextSalesClientCode(data) {
-  (data?.leads || []).forEach((lead) => noteClientCode(lead.clientCode));
-  (data?.quotes || []).forEach((quote) => noteClientCode(quote.clientCode));
-  eachSalesAccount((raw) => {
-    (raw?.leads || []).forEach((lead) => noteClientCode(lead?.clientCode));
-    (raw?.quotes || []).forEach((quote) => noteClientCode(quote?.clientCode));
+function collectedClientCodes(data, codes) {
+  (data?.leads || []).forEach((lead) => {
+    if (lead?.status === "Converted" && lead.clientCode) codes.push(lead.clientCode);
   });
+  (data?.quotes || []).forEach((quote) => {
+    if (quote?.clientCode) codes.push(quote.clientCode);
+  });
+}
+
+function nextSalesClientCode(data) {
+  const codes = [];
+  collectedClientCodes(data, codes);
+  eachSalesAccount((raw) => collectedClientCodes(raw, codes));
+  noteClientCodes(codes);
   return claimClientCode();
 }
 
 export function assignConvertedClientCodes(data) {
+  const leads = (data?.leads || []).map((lead) => ({ ...lead }));
   let changed = false;
-  const leads = (data?.leads || []).map((lead) => {
-    if (lead.clientCode) noteClientCode(lead.clientCode);
-    if (lead.status !== "Converted" || lead.clientCode) return lead;
+  leads.forEach((lead) => {
+    if (lead.status === "Converted" || !lead.clientCode) return;
+    lead.clientCode = "";
     changed = true;
-    return { ...lead, clientCode: claimClientCode() };
+  });
+  sortLeadsById(leads).forEach((lead) => {
+    if (lead.status !== "Converted") return;
+    if (lead.clientCode) {
+      noteClientCode(lead.clientCode);
+      return;
+    }
+    lead.clientCode = claimClientCode();
+    changed = true;
   });
   return changed ? { ...data, leads } : data;
 }
@@ -1770,11 +1794,29 @@ export function setPaymentStatus(data, paymentId, status, receipt) {
   };
 }
 
+function csvDelimiter(text) {
+  const line = String(text || "").replace(/^\uFEFF/, "").split(/\r?\n/, 1)[0] || "";
+  const counts = { ",": 0, "\t": 0, ";": 0 };
+  let quoted = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (char === "\"") {
+      if (quoted && line[index + 1] === "\"") index += 1;
+      else quoted = !quoted;
+    } else if (!quoted && Object.prototype.hasOwnProperty.call(counts, char)) {
+      counts[char] += 1;
+    }
+  }
+  const [mark, count] = Object.entries(counts).sort((left, right) => right[1] - left[1])[0];
+  return count > 0 ? mark : ",";
+}
+
 function parseCsv(text) {
   const rows = [];
   let row = [];
   let cell = "";
   let quoted = false;
+  const delimiter = csvDelimiter(text);
   const source = String(text || "").replace(/^\uFEFF/, "");
   for (let index = 0; index < source.length; index += 1) {
     const char = source[index];
@@ -1789,7 +1831,7 @@ function parseCsv(text) {
       }
     } else if (char === "\"") {
       quoted = true;
-    } else if (char === ",") {
+    } else if (char === delimiter) {
       row.push(cell);
       cell = "";
     } else if (char === "\n") {
@@ -1812,9 +1854,18 @@ function csvDate(value, fallback = todayISO()) {
   const raw = String(value || "").trim();
   if (!raw) return fallback;
   if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
-  const parts = raw.match(/^(\d{1,2})[/. -](\d{1,2})[/. -](\d{4})$/);
+  const parts = raw.match(/^(\d{1,2})[/. -](\d{1,2})[/. -](\d{2}|\d{4})$/);
   if (!parts) return fallback;
-  return `${parts[3]}-${parts[2].padStart(2, "0")}-${parts[1].padStart(2, "0")}`;
+  let day = Number(parts[1]);
+  let month = Number(parts[2]);
+  let year = Number(parts[3]);
+  if (parts[3].length === 2) year += year >= 70 ? 1900 : 2000;
+  if (month > 12 && day <= 12) [day, month] = [month, day];
+  if (month < 1 || month > 12 || day < 1 || day > 31) return fallback;
+  const iso = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  const check = new Date(`${iso}T00:00:00`);
+  if (check.getFullYear() !== year || check.getMonth() + 1 !== month || check.getDate() !== day) return fallback;
+  return iso;
 }
 
 const LEAD_CSV_FIELDS = {
@@ -1834,7 +1885,7 @@ const LEAD_CSV_FIELDS = {
 function csvHeaderMap(headers) {
   const map = {};
   headers.forEach((header, index) => {
-    const key = String(header || "").trim().toLowerCase();
+    const key = String(header || "").trim().toLowerCase().replace(/\s+/g, " ");
     Object.entries(LEAD_CSV_FIELDS).forEach(([field, names]) => {
       if (names.includes(key)) map[field] = index;
     });
@@ -1905,42 +1956,49 @@ export function importLeadsFromCsv(data, text, options = {}) {
       return sameName || samePhone;
     });
     if (duplicate || (phoneDigits(phone).length === 10 && leadPhoneTaken(phone))) {
-      skipped.push(`Row ${line} matches an existing lead.`);
+      skipped.push(`Row ${line} (${business}) matches an existing lead.`);
       return;
     }
     const notes = [csvValue(row, map, "notes", 9), importedExtras(headers, row, map)].filter((item) => String(item || "").trim()).join("\n");
     const businessType = String(csvValue(row, map, "businessType", 10) || "").trim();
-    const result = saveLead(current, {
-      imported: true,
-      unsaved: true,
-      date: csvDate(csvValue(row, map, "date", 2)),
-      business,
-      phone,
-      source: importedSource(csvValue(row, map, "source", 3)),
-      service: importedService(csvValue(row, map, "service", 4)),
-      status: csvValue(row, map, "status", 5) || "New",
-      email: csvValue(row, map, "email", 6),
-      address: csvValue(row, map, "address", 7),
-      next: csvDate(csvValue(row, map, "next", 8), ""),
-      notes,
-      businessType: businessType.toLowerCase() === "other" ? "Other" : businessType,
-      executive: options.executive || "",
-    });
+    let result;
+    try {
+      result = saveLead(current, {
+        imported: true,
+        unsaved: true,
+        date: csvDate(csvValue(row, map, "date", 2)),
+        business,
+        phone,
+        source: importedSource(csvValue(row, map, "source", 3)),
+        service: importedService(csvValue(row, map, "service", 4)),
+        status: csvValue(row, map, "status", 5) || "New",
+        email: csvValue(row, map, "email", 6),
+        address: csvValue(row, map, "address", 7),
+        next: csvDate(csvValue(row, map, "next", 8), ""),
+        notes,
+        businessType: businessType.toLowerCase() === "other" ? "Other" : businessType,
+        executive: options.executive || "",
+      });
+    } catch (error) {
+      skipped.push(`Row ${line} (${business}): ${error?.message || "could not be imported."}`);
+      return;
+    }
     if (!result.ok) {
-      skipped.push(`Row ${line}: ${result.error}`);
+      skipped.push(`Row ${line} (${business}): ${result.error}`);
       return;
     }
     const known = new Set((current.leads || []).map((lead) => lead.id));
     const added = (result.data.leads || []).filter((lead) => lead?.id && !known.has(lead.id));
     if (added.length !== 1) {
-      skipped.push(`Row ${line}: could not assign a new lead ID.`);
+      added.forEach((lead) => forgetLeadPhone(lead.id));
+      skipped.push(`Row ${line} (${business}): could not assign a new lead ID.`);
       return;
     }
     current = result.data;
     imported += 1;
   });
-  if (!imported) return { ok: false, error: skipped[0] || "No leads were imported." };
-  const skipNote = skipped.length ? ` Skipped ${skipped.length}: ${skipped.slice(0, 3).join(" ")}` : "";
+  if (!imported) return { ok: false, error: skipped.join(" ") || "No leads were imported." };
+  const skipNote = skipped.length ? ` Skipped ${skipped.length}: ${skipped.join(" ")}` : "";
   return {
     ok: true,
     data: current,
@@ -2028,14 +2086,18 @@ export function saveLead(data, draft) {
     next: draft.call?.next ?? draft.next ?? existing?.next ?? "",
     notes: String(draft.notes || "").trim(),
     executive: String(draft.executive || existing?.executive || ""),
-    clientCode: existing?.clientCode || (nextStatus === "Converted" ? nextSalesClientCode(data) : ""),
+    clientCode: nextStatus === "Converted" ? (existing?.clientCode || "") : "",
     calls,
   });
   if (lastCall && draft.call) {
     next.status = lastCall.status || next.status;
     next.next = lastCall.next || next.next;
   }
-  if (next.status === "Converted" && !next.clientCode) next.clientCode = nextSalesClientCode(data);
+  if (next.status === "Converted") {
+    if (!next.clientCode) next.clientCode = nextSalesClientCode(data);
+  } else {
+    next.clientCode = "";
+  }
   if (next.clientCode) noteClientCode(next.clientCode);
   const phoneAccepted = rememberLeadPhone(next.id, next.phone);
   if (digits.length === 10 && !samePhone && !phoneAccepted) {
