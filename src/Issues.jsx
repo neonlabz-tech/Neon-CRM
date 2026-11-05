@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { minSelectableDate } from "./sales.js";
 import { createPortal } from "react-dom";
 import {
   ISSUE_PRIORITIES,
@@ -461,7 +462,7 @@ function IssueDialog({ issue, projects, members, onClose, onSave }) {
           </label>
           <label>
             Due date
-            <input type="date" value={draft.dueDate} onChange={(event) => setField("dueDate", event.target.value)} />
+            <input type="date" min={minSelectableDate(draft.dueDate)} value={draft.dueDate} onChange={(event) => setField("dueDate", event.target.value)} />
           </label>
           <label className="span-2">
             Description

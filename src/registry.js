@@ -97,39 +97,55 @@ function taken(book, code) {
   return Boolean(load()[book].ids[canonical(spec, value)]);
 }
 
+function rememberIn(registry, book, code) {
+  const spec = BOOKS[book];
+  const number = codeNumber(spec.prefix, code);
+  if (!number) return;
+  registry[book].ids[formatCode(spec.prefix, spec.width, number)] = true;
+}
+
 function refreshRegistry() {
   const remote = registryRequest("GET", "/api/bootstrap");
   const stores = Array.isArray(remote?.stores) ? remote.stores : null;
   if (!stores) return;
-  const registry = load();
+  const registry = blank();
   const record = stores.find((item) => item?.key === REGISTRY_KEY);
   const incoming = record?.data && typeof record.data === "object" ? record.data : {};
-  for (const book of Object.keys(BOOKS)) {
-    const ids = incoming[book]?.ids && typeof incoming[book].ids === "object" ? incoming[book].ids : {};
-    Object.keys(ids).forEach((id) => {
-      const key = canonical(BOOKS[book], id);
-      if (key) registry[book].ids[key] = true;
-    });
-  }
   stores.forEach((item) => {
-    if (item?.key !== "neon-crm-sales" || !item.data) return;
-    const leads = [
-      ...(Array.isArray(item.data.leads) ? item.data.leads : []),
-      ...(Array.isArray(item.data.followUps) ? item.data.followUps : []),
-    ];
-    leads.forEach((lead) => {
-      const key = canonical(BOOKS.leads, lead?.id);
-      if (key) registry.leads.ids[key] = true;
-    });
+    if (item?.key === "neon-crm-sales" && item.data) {
+      [...(item.data.leads || []), ...(item.data.followUps || [])].forEach((lead) => rememberIn(registry, "leads", lead?.id));
+      (item.data.leads || []).forEach((lead) => rememberIn(registry, "clients", lead?.clientCode));
+      (item.data.quotes || []).forEach((quote) => {
+        rememberIn(registry, "clients", quote?.clientCode);
+        rememberIn(registry, "leads", quote?.clientId);
+      });
+      (item.data.payments || []).forEach((payment) => rememberIn(registry, "leads", payment?.clientId));
+    }
+    if (item?.key === "neon-crm-projects" && item.data) {
+      (item.data.projects || []).forEach((project) => rememberIn(registry, "projects", project?.code));
+    }
+    if (item?.key === "neon-crm-clients" && Array.isArray(item.data)) {
+      item.data.forEach((client) => rememberIn(registry, "clients", client?.code));
+    }
+    if (item?.key === "neon-crm-marketing" && item.data) {
+      (item.data.clients || []).forEach((doc) => rememberIn(registry, "projects", doc?.projectId));
+    }
   });
   for (const book of Object.keys(BOOKS)) {
     const numbers = Object.keys(registry[book].ids).map((id) => codeNumber(BOOKS[book].prefix, id)).filter(Boolean);
-    registry[book].sequence = Math.max(registry[book].sequence, Number(incoming[book]?.sequence) || 0, ...numbers, 0);
+    const highest = numbers.length ? Math.max(...numbers) : 0;
+    const ids = incoming[book]?.ids && typeof incoming[book].ids === "object" ? incoming[book].ids : {};
+    Object.keys(ids).forEach((id) => {
+      const number = codeNumber(BOOKS[book].prefix, id);
+      if (number > 0 && number <= highest) rememberIn(registry, book, id);
+    });
+    const kept = Object.keys(registry[book].ids).map((id) => codeNumber(BOOKS[book].prefix, id)).filter(Boolean);
+    registry[book].sequence = kept.length ? Math.max(...kept) : 0;
   }
   const phones = incoming.phones && typeof incoming.phones === "object" ? incoming.phones : {};
   Object.entries(phones).forEach(([digits, id]) => {
     const key = String(digits || "").replace(/\D/g, "").slice(0, 10);
-    if (key.length === 10 && id && !registry.phones[key]) registry.phones[key] = id;
+    if (key.length === 10 && id && registry.leads.ids[canonical(BOOKS.leads, id)]) registry.phones[key] = id;
   });
   crmStorage.keep(REGISTRY_KEY, JSON.stringify(registry));
 }
@@ -147,21 +163,15 @@ function suggest(book) {
   return code;
 }
 
-function claim(book, preferred = "", options = {}) {
+function allocate(book, preferred = "", options = {}) {
   const exact = Boolean(options.exact);
-  const remote = registryRequest("POST", "/api/registry/claim", { book, preferred, exact });
-  if (remote?.conflict) return "";
-  if (remote?.code) {
-    remember(book, remote.code);
-    return remote.code;
-  }
   const spec = BOOKS[book];
   const registry = load();
   const wanted = String(preferred || "").trim();
   const normalized = wanted ? canonical(spec, wanted) : "";
   if (exact && (!normalized || registry[book].ids[normalized])) return "";
   let code = normalized && !registry[book].ids[normalized] ? normalized : "";
-  let sequence = registry[book].sequence;
+  let sequence = Number(registry[book].sequence) || 0;
   if (!code) {
     do {
       sequence += 1;
@@ -174,12 +184,67 @@ function claim(book, preferred = "", options = {}) {
   return code;
 }
 
+function claim(book, preferred = "", options = {}) {
+  const exact = Boolean(options.exact);
+  if (exact) {
+    const remote = registryRequest("POST", "/api/registry/claim", { book, preferred, exact });
+    if (remote?.conflict) return "";
+    if (remote?.code) {
+      remember(book, remote.code);
+      return remote.code;
+    }
+  }
+  const code = allocate(book, preferred, options);
+  if (!exact && code) {
+    void fetch("/api/registry/claim", {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        ...(readSession()?.token ? { Authorization: `Bearer ${readSession().token}` } : {}),
+      },
+      body: JSON.stringify({ book, preferred: code, exact: true }),
+    }).catch(() => undefined);
+  }
+  return code;
+}
+
+function rememberMany(book, codes) {
+  const spec = BOOKS[book];
+  const registry = load();
+  let changed = false;
+  (codes || []).forEach((code) => {
+    const value = String(code || "").trim();
+    if (!value) return;
+    const key = canonical(spec, value);
+    if (!key) return;
+    if (!registry[book].ids[key]) {
+      registry[book].ids[key] = true;
+      changed = true;
+    }
+    const number = codeNumber(spec.prefix, key);
+    if (number > registry[book].sequence) {
+      registry[book].sequence = number;
+      changed = true;
+    }
+  });
+  if (changed) save(registry);
+}
+
 export function noteLeadId(id) {
   remember("leads", id);
 }
 
+export function noteLeadIds(ids) {
+  rememberMany("leads", ids);
+}
+
 export function noteClientCode(code) {
   remember("clients", code);
+}
+
+export function noteClientCodes(codes) {
+  rememberMany("clients", codes);
 }
 
 export function noteProjectCode(code) {
@@ -224,17 +289,19 @@ export function claimProjectCode(preferred = "", options = {}) {
 
 export function syncLeadPhones(phones) {
   const registry = load();
+  let changed = false;
   Object.entries(phones || {}).forEach(([digits, id]) => {
-    if (digits && id && !registry.phones[digits]) registry.phones[digits] = id;
+    if (digits && id && !registry.phones[digits]) {
+      registry.phones[digits] = id;
+      changed = true;
+    }
   });
-  save(registry);
+  if (changed) save(registry);
 }
 
 export function leadPhoneHolder(phone) {
   const digits = String(phone || "").replace(/\D/g, "").slice(0, 10);
   if (digits.length !== 10) return "";
-  const remote = registryRequest("GET", `/api/registry/phone?phone=${encodeURIComponent(digits)}`);
-  if (remote && remote.ok && typeof remote.holder === "string") return remote.holder;
   return String(load().phones[digits] || "");
 }
 
@@ -242,23 +309,35 @@ export function rememberLeadPhone(leadId, phone) {
   const id = String(leadId || "").trim();
   const digits = String(phone || "").replace(/\D/g, "").slice(0, 10);
   if (!id) return false;
-  const remote = registryRequest("POST", "/api/registry/phone", { leadId: id, phone: digits });
-  if (remote?.conflict) return false;
   const registry = load();
-  const holder = digits.length === 10 ? registry.phones[digits] : "";
-  if (!remote?.ok && holder && holder !== id) return false;
+  const holder = digits.length === 10 ? String(registry.phones[digits] || "") : "";
+  if (holder && holder !== id) return false;
+  let changed = false;
   Object.keys(registry.phones).forEach((key) => {
-    if (registry.phones[key] === id && key !== digits) delete registry.phones[key];
+    if (registry.phones[key] === id && key !== digits) {
+      delete registry.phones[key];
+      changed = true;
+    }
   });
-  if (digits.length === 10) registry.phones[digits] = id;
+  if (digits.length === 10 && registry.phones[digits] !== id) {
+    registry.phones[digits] = id;
+    changed = true;
+  }
+  if (!changed) return true;
   save(registry);
+  const remote = registryRequest("POST", "/api/registry/phone", { leadId: id, phone: digits });
+  if (remote?.conflict) {
+    const current = load();
+    if (digits.length === 10 && current.phones[digits] === id) delete current.phones[digits];
+    save(current);
+    return false;
+  }
   return true;
 }
 
 export function forgetLeadPhone(leadId) {
   const id = String(leadId || "").trim();
   if (!id) return;
-  registryRequest("POST", "/api/registry/phone/release", { leadId: id });
   const registry = load();
   let changed = false;
   Object.keys(registry.phones).forEach((key) => {
@@ -268,4 +347,13 @@ export function forgetLeadPhone(leadId) {
     }
   });
   if (changed) save(registry);
+  void fetch("/api/registry/phone/release", {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      ...(readSession()?.token ? { Authorization: `Bearer ${readSession().token}` } : {}),
+    },
+    body: JSON.stringify({ leadId: id }),
+  }).catch(() => undefined);
 }

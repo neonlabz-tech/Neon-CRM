@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import neonLogo from "./assets/neonlabz-logo.png";
 import { loadClients } from "./clients.js";
+import { api } from "./api.js";
+import { crmStorage, flushStores } from "./storage.js";
 import { dataOwner, sessionAccount } from "./scope.js";
 import { loadUsers } from "./crm.js";
 import { dismissNotice, loadFinance, loadNotices, projectInvoiceById, projectInvoiceFor } from "./finance.js";
@@ -12,6 +14,8 @@ import { scopeHasText } from "./richText.js";
 import { packageDocumentFromItem } from "./brandDocument.js";
 import { downloadDocumentPdf } from "./downloadPdf.js";
 import { formatPhone } from "./hrms.js";
+import { forgetLeadPhone } from "./registry.js";
+import { LeadPhoneField, LeadRegister } from "./LeadRegister.jsx";
 import { MonthField, monthLabel, reportingLabel } from "./ReportPeriod.jsx";
 import { companyProjects, loadProjects } from "./projects.js";
 import {
@@ -31,8 +35,14 @@ import {
   answeredCallsOn,
   approvedInstallments,
   assignConvertedClientCodes,
-  collectionTarget,
   confirmedCollections,
+  discountPercentOf,
+  minSelectableDate,
+  moneyFromPercent,
+  proratedTarget,
+  staffCommissionRate,
+  staffDailyGoals,
+  staffMonthlyTarget,
   inReportingPeriod,
   convertedClients,
   convertedPaymentClients,
@@ -48,13 +58,12 @@ import {
   formatQuoteAmount,
   formatQuoteDate,
   leadsLoggedToday,
-  LEAD_PHONE_EXISTS_MESSAGE,
   loadIncomingProjects,
   loadCeoSales,
   loadSales,
   releaseSalesPaymentsForApproval,
   importLeadsFromCsv,
-  nextLeadId,
+  reserveNextLeadId,
   nextQuoteNumber,
   outstandingBalance,
   previewQuote,
@@ -72,7 +81,6 @@ import {
   saveClientQuote,
   saveCeoSales,
   saveLead,
-  sortLeadsById,
   savePackage,
   saveSales,
   COVER_HEIGHT,
@@ -126,6 +134,40 @@ export function SalesWorkspace({ access, username, section, paymentsSource, pers
   useEffect(() => {
     releaseSalesPaymentsForApproval();
   }, [data.payments]);
+  useEffect(() => {
+    const owner = dataOwner();
+    if (!owner || sessionAccount()?.role !== "sales") return undefined;
+    let stop = false;
+    async function pullTargets() {
+      try {
+        const remote = await api("/api/bootstrap");
+        const store = (remote.stores || []).find((item) => item.key === "neon-crm-sales" && item.owner === owner);
+        if (!store?.data || stop) return;
+        const current = loadSales();
+        const next = {
+          ...current,
+          goals: store.data.goals || current.goals,
+          rates: store.data.rates || current.rates,
+          team: store.data.team || current.team,
+        };
+        const same = JSON.stringify([current.goals, current.rates, current.team]) === JSON.stringify([next.goals, next.rates, next.team]);
+        if (same) return;
+        const { packages, ...rest } = next;
+        crmStorage.keep(`neon-crm-sales:${owner}`, JSON.stringify(rest));
+        if (!stop) setData(loadSales());
+      } catch {
+        // The dashboard keeps the targets loaded at sign-in until the next refresh.
+      }
+    }
+    pullTargets();
+    const timer = window.setInterval(pullTargets, 15000);
+    window.addEventListener("focus", pullTargets);
+    return () => {
+      stop = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", pullTargets);
+    };
+  }, []);
   const executives = useMemo(() => {
     if (personal && username) {
       const self = loadUsers().find((user) => user.username === username);
@@ -182,30 +224,33 @@ export function SalesWorkspace({ access, username, section, paymentsSource, pers
       ) : null}
       {active === "sample" ? <SalesQuotationsPanel data={data} commit={commit} canEdit={canEdit} /> : null}
       {active === "payments" ? <PaymentsPanel data={data} commit={commit} canEdit={canEdit} month={month} range={range} source={paymentsSource} /> : null}
-      {active === "follow" ? <FollowUpPanel data={data} commit={commit} canEdit={canEdit} executives={executives} username={username} month={month} allowDelete={personal} /> : null}
+      {active === "follow" ? <FollowUpPanel data={data} commit={commit} canEdit={canEdit} executives={executives} username={username} month={month} allowDelete={canEdit} /> : null}
       {active === "packages" ? <PackagesPanel data={data} commit={commit} canEdit={canEdit} /> : null}
     </div>
   );
 }
 
 function OverviewPanel({ data, month, range, setMonth, setRange, executives, canEdit, commit }) {
-  const target = collectionTarget(data, month, executives.map((user) => user.username));
+  const owner = dataOwner();
+  const monthlyTarget = staffMonthlyTarget(owner);
+  const dailyGoals = staffDailyGoals(owner);
+  const commissionRate = staffCommissionRate(owner);
+  const ranged = Boolean(range?.from && range?.to);
+  const target = ranged ? proratedTarget(monthlyTarget, range.from, range.to) : monthlyTarget;
   const collected = confirmedCollections(data, month, range);
   const remaining = Math.max(0, target - collected);
   const percent = target > 0 ? Math.min(100, Math.round((collected / target) * 100)) : 0;
-  const commission = collected * (Number(data.rates?.rate) || 0) / 100;
+  const commission = collected * commissionRate / 100;
   const label = reportingLabel(month, range);
-  const ranged = Boolean(range?.from && range?.to);
   const today = todayISO();
   const [day, setDay] = useState(() => missionDay());
   const leads = data.leads || [];
   const due = dueLeads(leads, today);
   const answered = answeredCallsOn(leads, day);
-  const callTarget = Number(data.goals?.daily) || 0;
-  const leadGoal = Number(data.goals?.leadTarget) || 0;
+  const callTarget = dailyGoals.calls;
+  const leadGoal = dailyGoals.leads;
   const newToday = leads.filter((item) => item.date === day).length;
   const newMonth = leads.filter((item) => inReportingPeriod(item.date, month, range)).length;
-  const owner = dataOwner();
   const pending = outstandingBalance(owner);
   const recent = (data.payments || [])
     .filter((payment) => payment.status !== "cancelled" && inReportingPeriod(payment.date, month, range))
@@ -241,10 +286,10 @@ function OverviewPanel({ data, month, range, setMonth, setRange, executives, can
         <Stat label="Monthly sales target" value={formatMoney(target)} note={monthLabel(month)} />
         <Stat label="Confirmed collections" value={formatMoney(collected)} note={ranged ? `Payments received ${label}` : "Payments received in this month"} />
         <Stat label="Remaining target" value={formatMoney(remaining)} note="To achieve the monthly target" />
-        <Stat label="Earned commission" value={formatMoney(commission)} note={`${data.rates?.rate || 0}% on confirmed collections`} />
+        <Stat label="Earned commission" value={formatMoney(commission)} note={`${commissionRate || 0}% on confirmed collections`} />
       </div>
       <div className="chart-grid">
-        <article className="panel">
+        <article className="panel chart-span">
           <h2>Monthly sales progress</h2>
           <div className="sales-statrow">
             <div><span>Achievement</span><b>{percent}%</b></div>
@@ -252,15 +297,6 @@ function OverviewPanel({ data, month, range, setMonth, setRange, executives, can
             <div><span>Target</span><b>{formatMoney(target)}</b></div>
           </div>
           <div className="sales-progress" aria-hidden="true"><b style={{ width: `${percent}%` }} /></div>
-        </article>
-        <article className="panel">
-          <h2>Today's call performance</h2>
-          <div className="sales-statrow">
-            <div><span>Answered calls</span><b>{answered}</b></div>
-            <div><span>Call target</span><b>{callTarget}</b></div>
-            <div><span>Remaining</span><b>{Math.max(0, callTarget - answered)}</b></div>
-          </div>
-          <div className="sales-progress" aria-hidden="true"><b style={{ width: `${callTarget ? Math.min(100, (answered / callTarget) * 100) : 0}%` }} /></div>
         </article>
       </div>
       <div className="stats">
@@ -317,10 +353,7 @@ function OverviewPanel({ data, month, range, setMonth, setRange, executives, can
           onClose={() => setLeadForm(null)}
           onSave={(draftLead) => {
             const result = saveLead(data, draftLead);
-            if (!result.ok) {
-              if (result.error === LEAD_PHONE_EXISTS_MESSAGE) window.alert(result.error);
-              return result.error;
-            }
+            if (!result.ok) return result.error;
             const stored = commit(result.data);
             if (stored) return stored;
             setLeadForm(null);
@@ -572,7 +605,7 @@ function clientQuoteDraft(client, packages, quote) {
         };
       })
       : [blankSalesQuoteLine(packages, packageCategory(client.service))],
-    discount: String(quote?.discount || 0),
+    discount: String(discountPercentOf(quote) || 0),
     date: quote?.date || date,
     valid: quote?.valid || addDays(quote?.date || date, 14),
     terms: quote?.terms || "As agreed with the client.",
@@ -639,8 +672,7 @@ function SalesQuotationsPanel({ data, commit, canEdit }) {
   }
 
   const subtotal = (draft?.lines || []).reduce((sum, line) => sum + (Number(line.price) || 0), 0);
-  const offer = Number(draft?.discount);
-  const total = Math.max(0, subtotal - (Number.isFinite(offer) && offer > 0 ? offer : 0));
+  const total = Math.max(0, subtotal - moneyFromPercent(subtotal, draft?.discount));
 
   return (
     <div className="stack">
@@ -734,7 +766,7 @@ function SalesQuotationsPanel({ data, commit, canEdit }) {
               </label>
               <label>
                 Quotation date
-                <input type="date" value={draft.date} onChange={(event) => setDraft({ ...draft, date: event.target.value })} required />
+                <input type="date" min={minSelectableDate(draft.date)} value={draft.date} onChange={(event) => setDraft({ ...draft, date: event.target.value })} required />
               </label>
               <div className="span-all quote-lines">
                 {draft.lines.map((line, index) => {
@@ -806,8 +838,8 @@ function SalesQuotationsPanel({ data, commit, canEdit }) {
                 </button>
               </div>
               <label>
-                Offer / discount (LKR)
-                <input type="number" min="0" step="0.01" value={draft.discount} onChange={(event) => setDraft({ ...draft, discount: event.target.value })} />
+                Offer / discount (%)
+                <input type="number" min="0" max="100" step="0.1" value={draft.discount} onChange={(event) => setDraft({ ...draft, discount: event.target.value })} />
               </label>
               <div className="budget-total span-all">
                 <span>Promised amount</span>
@@ -837,7 +869,7 @@ function QuotesPanel({ data, commit, canEdit, projects, documentHeading = "QUOTA
   const [removing, setRemoving] = useState(null);
   const [removeError, setRemoveError] = useState("");
   const subtotal = draft.lines.reduce((sum, line) => sum + (Number(line.price) || 0), 0);
-  const figures = quotationFigures(subtotal, draft.discount);
+  const figures = { ...quotationFigures(subtotal, moneyFromPercent(subtotal, draft.discount)), percent: Number(draft.discount) || 0 };
 
   function setField(field, value) {
     setDraft((current) => ({ ...current, [field]: value }));
@@ -994,11 +1026,11 @@ function QuotesPanel({ data, commit, canEdit, projects, documentHeading = "QUOTA
               {draft.contactFromSales ? <p className="page-note span-all">Email, phone, and address are filled from the sales follow-up for this client.</p> : null}
               <label>
                 Quotation date
-                <input type="date" value={draft.date} onChange={(event) => setField("date", event.target.value)} required />
+                <input type="date" min={minSelectableDate(draft.date)} value={draft.date} onChange={(event) => setField("date", event.target.value)} required />
               </label>
               <label>
                 Valid until
-                <input type="date" value={draft.valid} onChange={(event) => setField("valid", event.target.value)} required />
+                <input type="date" min={minSelectableDate(draft.valid)} value={draft.valid} onChange={(event) => setField("valid", event.target.value)} required />
               </label>
               <div className="span-all quote-lines">
                 {draft.lines.map((line, index) => {
@@ -1080,10 +1112,10 @@ function QuotesPanel({ data, commit, canEdit, projects, documentHeading = "QUOTA
                   Add another package
                 </button>
               </div>
-              <p className="hint span-all">Subtotal {formatMoney(figures.subtotal)} · Discount {formatMoney(figures.discount)} · VAT (8%) {formatMoney(figures.vat)} · Estimated grand total {formatMoney(figures.grand)}</p>
+              <p className="hint span-all">Subtotal {formatMoney(figures.subtotal)} · Discount {formatDiscountPercent(draft.discount)}% ({formatMoney(figures.discount)}) · VAT (8%) {formatMoney(figures.vat)} · Estimated grand total {formatMoney(figures.grand)}</p>
               <label>
-                Offer / discount (LKR)
-                <input type="number" min="0" step="0.01" value={draft.discount} onChange={(event) => setField("discount", event.target.value)} required />
+                Offer / discount (%)
+                <input type="number" min="0" max="100" step="0.1" value={draft.discount} onChange={(event) => setField("discount", event.target.value)} required />
               </label>
               <label className="span-all">
                 Payment terms
@@ -1195,7 +1227,7 @@ function QuotePaper({ quote, heading = "QUOTATION" }) {
   if (String(heading || "").toUpperCase() === "INVOICE") {
     return <iframe className="receipt-frame invoice-frame" title={quote.number || "Invoice"} srcDoc={quotationDocument(quote, "INVOICE")} />;
   }
-  const figures = quotationFigures(quote.price, quote.discount);
+  const figures = { ...quotationFigures(quote.price, quote.discount), percent: discountPercentOf(quote) };
   const lines = quote.items?.length ? quote.items : [];
   return (
     <article className="quote-paper">
@@ -1405,7 +1437,7 @@ function PaymentsPanel({ data, commit, canEdit, month, range, source }) {
               </label>
               <label>
                 Payment date
-                <input type="date" value={draft.date} onChange={(event) => setDraft({ ...draft, date: event.target.value })} required />
+                <input type="date" min={minSelectableDate(draft.date)} value={draft.date} onChange={(event) => setDraft({ ...draft, date: event.target.value })} required />
               </label>
               {ownPayments ? (
                 <label>
@@ -1465,7 +1497,6 @@ function PaymentsPanel({ data, commit, canEdit, month, range, source }) {
         </article>
       ) : (
         <div className="toolbar">
-          <button className="ghost" type="button" onClick={() => downloadPayments(visible, quotes, month)}>Export month CSV</button>
         </div>
       )}
       <article className="panel">
@@ -1478,7 +1509,6 @@ function PaymentsPanel({ data, commit, canEdit, month, range, source }) {
               placeholder="Filter by client name or ID"
               aria-label="Filter by client name or ID"
             />
-            <button className="ghost" type="button" onClick={() => downloadPayments(visible, quotes, month)}>Export CSV</button>
           </div>
         </div>
         {visible.length === 0 ? (
@@ -1689,25 +1719,31 @@ function ConfirmedCeoQuotes({ username }) {
   );
 }
 
+function decodeCsvBuffer(buffer) {
+  const bytes = buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : new Uint8Array();
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return new TextDecoder("windows-1252").decode(bytes);
+  }
+}
+
 function FollowUpPanel({ data, commit, canEdit, executives, username, month, allowDelete = false }) {
-  const today = todayISO();
   const csvInput = useRef(null);
-  const [query, setQuery] = useState("");
+  const alive = useRef(true);
+  const [importing, setImporting] = useState(false);
   const [notice, setNotice] = useState("");
-  const [status, setStatus] = useState("");
-  const [source, setSource] = useState("");
   const [open, setOpen] = useState(null);
   const [removing, setRemoving] = useState(null);
   const [error, setError] = useState("");
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
   const leads = data.leads || [];
   const canRemove = canEdit && allowDelete;
-  const rows = sortLeadsById(leads.filter((lead) => {
-    const hay = `${lead.id} ${lead.business} ${lead.phone}`.toLowerCase();
-    if (query && !hay.includes(query.toLowerCase())) return false;
-    if (status && lead.status !== status) return false;
-    if (source && lead.source !== source) return false;
-    return true;
-  }));
 
   function save(draft) {
     const result = saveLead(data, {
@@ -1715,7 +1751,6 @@ function FollowUpPanel({ data, commit, canEdit, executives, username, month, all
       executive: draft.executive || defaultExecutive(executives, username),
     });
     if (!result.ok) {
-      if (result.error === LEAD_PHONE_EXISTS_MESSAGE) window.alert(result.error);
       setError(result.error);
       return result.error;
     }
@@ -1729,136 +1764,116 @@ function FollowUpPanel({ data, commit, canEdit, executives, username, month, all
     return "";
   }
 
+  function removeSelected(rows) {
+    if (sessionAccount()?.role === "sales") return "Sales admins cannot delete leads.";
+    let current = data;
+    const notes = [];
+    (rows || []).forEach((lead) => {
+      const result = deleteLead(current, lead.id);
+      if (!result.ok) notes.push(`${lead.id}: ${result.error}`);
+      else current = result.data;
+    });
+    if (current !== data) {
+      const stored = commit(current);
+      if (stored) return stored;
+    }
+    setError(notes.join(" "));
+    setRemoving(null);
+    if ((rows || []).some((lead) => lead.id === open?.id)) setOpen(null);
+    return notes.join(" ");
+  }
+
   function removeLead(event) {
     event.preventDefault();
     if (!removing) return;
-    const result = deleteLead(data, removing.id);
-    if (!result.ok) {
-      setError(result.error);
-      return;
-    }
-    const stored = commit(result.data);
-    if (stored) {
-      setError(stored);
-      return;
-    }
-    setError("");
-    setRemoving(null);
-    if (open?.id === removing.id) setOpen(null);
+    removeSelected([removing]);
   }
 
   return (
     <div className="stack">
-      <div className="toolbar">
-        <div>
-          <h2>Leads</h2>
-        </div>
-        <div className="lead-header-actions">
-          {canEdit ? (
-            <>
-              <input
-                ref={csvInput}
-                type="file"
-                accept=".csv,text/csv"
-                hidden
-                onChange={(event) => {
+      {canEdit ? (
+        <input
+          ref={csvInput}
+          type="file"
+          accept=".csv,text/csv"
+          hidden
+          onChange={(event) => {
                   const file = event.target.files?.[0];
                   event.target.value = "";
-                  if (!file) return;
+                  if (!file || importing) return;
+                  setImporting(true);
+                  setNotice("");
+                  setError("");
                   const reader = new FileReader();
-                  reader.onload = () => {
-                    const result = importLeadsFromCsv(data, String(reader.result || ""), {
-                      executive: defaultExecutive(executives, username),
-                    });
-                    if (!result.ok) {
-                      setNotice("");
-                      setError(result.error);
-                      return;
-                    }
-                    const stored = commit(result.data);
-                    if (stored) {
-                      setNotice("");
-                      setError(stored);
-                      return;
-                    }
-                    setError("");
-                    setNotice(result.message);
+                  reader.onerror = () => {
+                    if (!alive.current) return;
+                    setImporting(false);
+                    setError("The CSV file could not be read.");
                   };
-                  reader.readAsText(file);
+                  reader.onload = () => {
+                    window.setTimeout(() => {
+                        void (async () => {
+                          try {
+                            const result = importLeadsFromCsv(data, decodeCsvBuffer(reader.result), {
+                              executive: defaultExecutive(executives, username),
+                            });
+                            if (!alive.current) return;
+                            if (!result.ok) {
+                              setNotice("");
+                              setError(result.error);
+                              return;
+                            }
+                            const stored = commit(result.data);
+                            if (!alive.current) return;
+                            if (stored) {
+                              setNotice("");
+                              setError(stored);
+                              return;
+                            }
+                            const saved = await flushStores();
+                            if (!alive.current) return;
+                            if (saved === false) {
+                              const previous = new Set((data.leads || []).map((lead) => lead.id));
+                              (result.data.leads || []).forEach((lead) => {
+                                if (lead?.id && !previous.has(lead.id)) forgetLeadPhone(lead.id);
+                              });
+                              commit(data);
+                              setNotice("");
+                              setError("The leads could not be saved. Import the CSV again.");
+                              return;
+                            }
+                            setError("");
+                            setNotice(result.message);
+                          } catch (error) {
+                            if (!alive.current) return;
+                            setNotice("");
+                            setError(error?.message || "The CSV could not be imported.");
+                          } finally {
+                            if (alive.current) setImporting(false);
+                          }
+                        })();
+                    }, 50);
+                  };
+                  reader.readAsArrayBuffer(file);
                 }}
-              />
-              <button className="ghost" type="button" onClick={() => csvInput.current?.click()}>Import CSV</button>
-              <button className="primary" type="button" onClick={() => { setOpen(blankLead(defaultExecutive(executives, username), month, nextLeadId())); setError(""); setNotice(""); }}>
-                + Add lead
-              </button>
-            </>
-          ) : null}
-        </div>
-      </div>
+        />
+      ) : null}
+      {importing ? <p className="form-note" role="status" aria-live="polite">Importing CSV. Please wait until the leads are saved.</p> : null}
+      {error ? <p className="form-error">{error}</p> : null}
+      {notice ? <p className="form-note">{notice}</p> : null}
       <article className="panel sales-leads">
-        <div className="toolbar">
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search ID, business or phone..." />
-          <select value={status} onChange={(event) => setStatus(event.target.value)}>
-            <option value="">All statuses</option>
-            {LEAD_STAGES.map((item) => <option key={item}>{item}</option>)}
-          </select>
-          <select value={source} onChange={(event) => setSource(event.target.value)}>
-            <option value="">All sources</option>
-            {LEAD_SOURCES.map((item) => <option key={item}>{item}</option>)}
-          </select>
-        </div>
-        {error ? <p className="form-error">{error}</p> : null}
-        {notice ? <p className="form-note">{notice}</p> : null}
-        {rows.length === 0 ? (
-          <p className="empty-copy">No matching leads.</p>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>Lead ID</th>
-                <th>Date</th>
-                <th>Business / Customer</th>
-                <th className="phone-cell">Phone</th>
-                <th>Source</th>
-                <th>Interested service</th>
-                <th>Lead status</th>
-                <th>Follow-ups</th>
-                <th>Next follow-up</th>
-                {canRemove ? <th>Actions</th> : null}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((lead) => {
-                const overdue = lead.next && lead.next < today && lead.status !== "Converted" && lead.status !== "Lost";
-                return (
-                  <tr key={lead.id} className={overdue ? "due-row" : ""} onClick={() => { setOpen(lead); setError(""); }}>
-                    <td>
-                      <code>{lead.id}</code>
-                      {lead.clientCode ? <div className="muted">{lead.clientCode}</div> : null}
-                    </td>
-                    <td>{lead.date || "—"}</td>
-                    <td><strong>{lead.business}</strong></td>
-                    <td className="phone-cell">{lead.phone || "—"}</td>
-                    <td>{lead.source || "—"}</td>
-                    <td>{lead.service || "—"}</td>
-                    <td><LeadStatus status={lead.status} /></td>
-                    <td><span className="history-count">{(lead.calls || []).length}</span></td>
-                    <td className={overdue ? "issue-overdue" : ""}>{lead.next || "—"}{overdue ? " · Overdue" : ""}</td>
-                    {canRemove ? (
-                      <td onClick={(event) => event.stopPropagation()}>
-                        <div className="icon-actions">
-                          <IconButton label={`Delete ${lead.business || lead.id}`} tone="danger" onClick={() => { setRemoving(lead); setError(""); }}>
-                            <DeleteIcon />
-                          </IconButton>
-                        </div>
-                      </td>
-                    ) : null}
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
+        <LeadRegister
+          leads={leads.map((lead) => ({ ...lead, owner: lead.executive || username }))}
+          canEdit={canEdit}
+          canRevise={canEdit}
+          canDelete={false}
+          showPerson={false}
+          staff={executives}
+          onOpen={(lead) => { setOpen(lead); setError(""); }}
+          onAdd={canEdit ? () => { setOpen(blankLead(defaultExecutive(executives, username), month, reserveNextLeadId())); setError(""); setNotice(""); } : undefined}
+          onDelete={removeSelected}
+          extraActions={canEdit ? <button className="ghost" type="button" title="Columns: Date, Business / Customer, Phone, Source, Interested Service, Lead Status, Business Type, Address, Email" disabled={importing} onClick={() => csvInput.current?.click()}>{importing ? "Importing…" : "Import CSV"}</button> : null}
+        />
       </article>
       {open ? (
         <LeadDialog
@@ -1868,7 +1883,7 @@ function FollowUpPanel({ data, commit, canEdit, executives, username, month, all
           error={error}
           onClose={() => setOpen(null)}
           onSave={save}
-          onDelete={canRemove ? () => { setRemoving(open); setOpen(null); setError(""); } : null}
+          onDelete={null}
         />
       ) : null}
       {removing ? (
@@ -1889,7 +1904,8 @@ function FollowUpPanel({ data, commit, canEdit, executives, username, month, all
 }
 
 function LeadDialog({ lead, executives, canEdit, error, onClose, onSave, onDelete }) {
-  const existing = Boolean(lead.business);
+  const saved = !lead.unsaved;
+  const existing = saved || Boolean(lead.business);
   const [draft, setDraft] = useState({ ...lead, phone: formatPhone(lead.phone) });
   const [call, setCall] = useState(null);
   const [callIndex, setCallIndex] = useState(null);
@@ -1901,6 +1917,7 @@ function LeadDialog({ lead, executives, canEdit, error, onClose, onSave, onDelet
 
   function submit(event) {
     event.preventDefault();
+    if (!canEdit) return;
     const payload = { ...draft, call: call || undefined, callIndex: call ? callIndex : undefined };
     const result = onSave(payload);
     if (result) setMessage(result);
@@ -1910,6 +1927,8 @@ function LeadDialog({ lead, executives, canEdit, error, onClose, onSave, onDelet
     <SalesModal onClose={onClose}>
       <form className="modal sheet" onSubmit={submit}>
         <h2>{existing ? "Lead profile & follow-ups" : "Add lead"}</h2>
+        {existing && !canEdit ? <p className="page-note">This lead is view only.</p> : null}
+        <fieldset className="plain-fieldset" disabled={!canEdit}>
         <div className="sales-grid">
           <label>
             Lead ID
@@ -1923,16 +1942,13 @@ function LeadDialog({ lead, executives, canEdit, error, onClose, onSave, onDelet
           ) : null}
           <label>
             Date
-            <input type="date" value={draft.date} onChange={(event) => setField("date", event.target.value)} required />
+            <input type="date" min={minSelectableDate(lead.date)} value={draft.date} onChange={(event) => setField("date", event.target.value)} required />
           </label>
           <label>
             Business / Customer
             <input value={draft.business} onChange={(event) => setField("business", event.target.value)} required maxLength={150} />
           </label>
-          <label>
-            Phone
-            <input type="tel" inputMode="numeric" value={draft.phone} onChange={(event) => setField("phone", formatPhone(event.target.value))} placeholder="000-000-0000" maxLength={12} required />
-          </label>
+          <LeadPhoneField value={draft.phone} exceptId={existing ? draft.id : ""} onChange={(phone) => setField("phone", phone)} />
           <label>
             Source
             <select value={draft.source} onChange={(event) => setField("source", event.target.value)}>
@@ -1960,12 +1976,6 @@ function LeadDialog({ lead, executives, canEdit, error, onClose, onSave, onDelet
           </label>
           {existing ? (
             <>
-              <label>
-                Lead status
-                <select value={draft.status} onChange={(event) => setField("status", event.target.value)}>
-                  {LEAD_STAGES.map((item) => <option key={item}>{item}</option>)}
-                </select>
-              </label>
               {executives.length > 1 ? (
                 <label>
                   Sales executive
@@ -2001,6 +2011,7 @@ function LeadDialog({ lead, executives, canEdit, error, onClose, onSave, onDelet
                   >
                     <strong>{item.date || "—"} · {item.outcome || "—"}</strong>
                     <span>{item.note || "No notes"}</span>
+                    {item.createdAt ? <small>Recorded {formatRecordedAt(item.createdAt)}</small> : null}
                     <small>Edit record #{index + 1}</small>
                   </button>
                 ))}
@@ -2022,19 +2033,19 @@ function LeadDialog({ lead, executives, canEdit, error, onClose, onSave, onDelet
                   </label>
                   <label>
                     Call result
-                    <select value={call.outcome} onChange={(event) => setCall({ ...call, outcome: event.target.value })}>
+                    <select value={call.outcome} onChange={(event) => setCall({ ...call, outcome: event.target.value, status: event.target.value === "Not Answered" ? draft.status : call.status })}>
                       {CALL_OUTCOMES.map((item) => <option key={item}>{item}</option>)}
                     </select>
                   </label>
                   <label>
                     Lead status after call
-                    <select value={call.status} onChange={(event) => setCall({ ...call, status: event.target.value })}>
+                    <select value={call.outcome === "Not Answered" ? draft.status : call.status} onChange={(event) => setCall({ ...call, status: event.target.value })} disabled={call.outcome === "Not Answered"}>
                       {LEAD_STAGES.map((item) => <option key={item}>{item}</option>)}
                     </select>
                   </label>
                   <label>
                     Next follow-up date
-                    <input type="date" value={call.next} onChange={(event) => setCall({ ...call, next: event.target.value })} />
+                    <input type="date" min={minSelectableDate()} value={call.next} onChange={(event) => setCall({ ...call, next: event.target.value })} />
                   </label>
                   <label className="span-all">
                     Conversation / notes
@@ -2045,6 +2056,7 @@ function LeadDialog({ lead, executives, canEdit, error, onClose, onSave, onDelet
             ) : null}
           </section>
         ) : null}
+        </fieldset>
         {message ? <p className="form-error" role="alert">{message}</p> : null}
         <div className="modal-actions">
           {canEdit ? <button className="primary" type="submit">Save</button> : null}
@@ -2070,11 +2082,25 @@ function blankLead(executive, month, id = "") {
     source: "Other",
     service: "",
     status: "New",
+    unsaved: true,
     next: "",
     notes: "",
     executive,
     calls: [],
   };
+}
+
+function formatRecordedAt(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Colombo",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
 }
 
 function blankCall(lead) {
@@ -2621,7 +2647,7 @@ function draftFromQuote(quote, packages, projects) {
         period: item.period,
       };
     }),
-    discount: String(quote.discount),
+    discount: String(discountPercentOf(quote) || 0),
     terms: quote.terms,
     date: quote.date,
     valid: quote.valid,
@@ -2760,7 +2786,9 @@ function FollowStatus({ status }) {
 
 function dateInMonth(month) {
   const today = todayISO();
-  return today.slice(0, 7) === month ? today : `${month}-01`;
+  if (today.slice(0, 7) === month) return today;
+  const first = `${month}-01`;
+  return first < today ? today : first;
 }
 
 function blankPackage() {

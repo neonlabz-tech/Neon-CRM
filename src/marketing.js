@@ -1,5 +1,5 @@
 import { loadUsers } from "./crm.js";
-import { downloadLetterhead, wrapLetterhead } from "./letterhead.js";
+import { downloadLetterhead, formatCoverDate, wrapLetterhead } from "./letterhead.js";
 import { readAccount, readScoped, writeScoped } from "./scope.js";
 
 const STORAGE_KEY = "neon-crm-marketing";
@@ -22,6 +22,47 @@ export function loadMarketing() {
 
 export function saveMarketing(data) {
   writeScoped(STORAGE_KEY, data);
+}
+
+export function plansForProject(project, data = loadMarketing()) {
+  const code = String(project?.code || "").trim().toLowerCase();
+  const name = String(project?.client || project?.name || "").trim().toLowerCase();
+  const clientIds = new Set(
+    (data.clients || [])
+      .filter((client) => {
+        const clientCode = String(client.projectId || "").trim().toLowerCase();
+        const brand = String(client.brandName || "").trim().toLowerCase();
+        return (code && clientCode === code) || (name && brand === name);
+      })
+      .map((client) => client.id),
+  );
+  return (data.plans || []).filter((plan) => clientIds.has(plan.clientId));
+}
+
+export function savePlanPostStatus(planId, monthId, postId, status) {
+  const data = loadMarketing();
+  const nextStatus = postStatusLabel(status);
+  let found = false;
+  const plans = data.plans.map((plan) => {
+    if (plan.id !== planId) return plan;
+    return {
+      ...plan,
+      months: (plan.months || []).map((month) => {
+        if (month.id !== monthId) return month;
+        return {
+          ...month,
+          posts: (month.posts || []).map((post) => {
+            if (post.id !== postId) return post;
+            found = true;
+            return { ...post, status: nextStatus };
+          }),
+        };
+      }),
+    };
+  });
+  if (!found) return { ok: false, error: "That content item was not found." };
+  saveMarketing({ ...data, plans });
+  return { ok: true, data: loadMarketing() };
 }
 
 export function loadCompanyMarketing() {
@@ -84,8 +125,20 @@ export function blankClient() {
   };
 }
 
+export const POST_TYPES = ["Poster", "Reel"];
+
+export function postTypeLabel(value) {
+  const text = String(value || "").trim();
+  if (/^video$/i.test(text) || /^reel$/i.test(text)) return "Reel";
+  return "Poster";
+}
+
+export function postStatusLabel(value) {
+  return /^completed$/i.test(String(value || "").trim()) ? "Completed" : "Pending";
+}
+
 export function blankPost() {
-  return { id: uid(), date: "", time: "", topic: "", type: "Image", goal: "" };
+  return { id: uid(), date: "", time: "", topic: "", type: "Poster", status: "Pending" };
 }
 
 export function blankMonth(index) {
@@ -156,7 +209,19 @@ export function blankPlatformStats() {
     reelsInteractions: "",
     storiesInteractions: "",
     videoNote: "",
+    analysisImages: [],
   };
+}
+
+function normalizeAnalysisImages(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((image) => image && typeof image.src === "string" && image.src.startsWith("data:image/"))
+    .map((image) => ({
+      id: image.id || uid(),
+      name: String(image.name || "Image").slice(0, 180),
+      src: image.src,
+    }));
 }
 
 function blankPlatforms() {
@@ -165,7 +230,8 @@ function blankPlatforms() {
 
 export function platformHasData(stats) {
   if (!stats) return false;
-  return Object.values(stats).some((value) => String(value ?? "").trim());
+  if (Array.isArray(stats.analysisImages) && stats.analysisImages.some((image) => image?.src)) return true;
+  return Object.entries(stats).some(([key, value]) => key !== "analysisImages" && String(value ?? "").trim());
 }
 
 function platformIdFromLabel(value) {
@@ -208,14 +274,18 @@ export function normalizeReport(report = {}) {
   next.platforms = blankPlatforms();
   if (report.platforms && typeof report.platforms === "object") {
     for (const { id } of REPORT_PLATFORMS) {
-      next.platforms[id] = { ...blankPlatformStats(), ...(report.platforms[id] || {}) };
+      const stats = { ...blankPlatformStats(), ...(report.platforms[id] || {}) };
+      stats.analysisImages = normalizeAnalysisImages(report.platforms[id]?.analysisImages);
+      next.platforms[id] = stats;
     }
   } else {
     const id = platformIdFromLabel(report.platform) || "facebook";
     const stats = blankPlatformStats();
     for (const key of Object.keys(stats)) {
+      if (key === "analysisImages") continue;
       if (report[key] != null) stats[key] = report[key];
     }
+    stats.analysisImages = normalizeAnalysisImages(stats.analysisImages);
     next.platforms[id] = stats;
   }
   return next;
@@ -324,8 +394,20 @@ function platformLetterhead(label, stats) {
         ["Stories interactions", stats.storiesInteractions],
       ]))}
       ${stats.videoNote ? `<h2>Video performance</h2><p>${escapeHtml(stats.videoNote)}</p>` : ""}
+      ${analysisFigures(stats.analysisImages)}
     </section>
   `;
+}
+
+function analysisFigures(images) {
+  const list = Array.isArray(images) ? images.filter((image) => image?.src) : [];
+  if (!list.length) return "";
+  return `<h2>Final analysis</h2>${list.map((image) => `
+    <figure class="analysis-shot pdf-keep">
+      <img src="${image.src}" alt="${escapeHtml(image.name || "Final analysis image")}" />
+      ${image.name ? `<figcaption>${escapeHtml(image.name)}</figcaption>` : ""}
+    </figure>
+  `).join("")}`;
 }
 
 export function reportHtml(report) {
@@ -335,14 +417,16 @@ export function reportHtml(report) {
   const sections = REPORT_PLATFORMS.map(({ id, label }) => platformLetterhead(label, data.platforms[id])).join("");
   return wrapLetterhead({
     title: `${data.clientName || "Client"} ${data.title || "Report"}`.trim(),
-    extraCss: `
-      .metrics { display:grid; grid-template-columns:1fr 1fr; gap:8px 12px; margin:0 0 14px; }
-      .metrics div { background:#F5F6FC; border:1px solid #E2E5F0; border-radius:8px; padding:8px 10px; }
-      .metrics span { display:block; font-size:10px; letter-spacing:.06em; text-transform:uppercase; color:#646473; }
-      .metrics strong { font-size:15px; }
-      .platform-block { margin:0 0 8px; padding-bottom:8px; border-bottom:1px solid #E2E5F0; }
-      .platform-block:last-of-type { border-bottom:0; }
-    `,
+    skipCover: true,
+    cover: {
+      title: data.title || "Monthly Social Media Report",
+      preparedFor: data.clientName || "Client",
+      period: periodLabel(data.startDate, data.endDate),
+      department: "Marketing",
+      source: "Social media report",
+      date: data.endDate || data.savedAt,
+      preparedBy: "Marketing team",
+    },
     body: `
       <p class="kicker">Digital marketing report</p>
       <h1>${escapeHtml(data.clientName || "Client")}</h1>
@@ -372,55 +456,109 @@ function contactLine(name, title) {
   return title ? `${name}, ${title}` : name;
 }
 
-function socialLine(label, account = {}) {
-  const bits = [account.username, account.password, account.pageLink].filter(Boolean);
-  return `<li>${escapeHtml(label)}: ${escapeHtml(bits.join(" / ") || "—")}</li>`;
+function fieldValue(value) {
+  const text = String(value ?? "").trim();
+  return escapeHtml(text || "—");
+}
+
+function socialValue(account = {}) {
+  return [account.username, account.password, account.pageLink].filter(Boolean).join(" / ");
 }
 
 export function infoDocFileName(client) {
   return `${fileSlug(`${client.projectId || "project"}-${client.brandName || "client"}`) || "info-doc"}.html`;
 }
 
+function detailLine(label, value) {
+  return `<p>${escapeHtml(label)}: ${fieldValue(value)}</p>`;
+}
+
+const PROFILE_CSS = `
+  .doc-body { padding: 26px 42px 12px; }
+  .doc-body h1 { margin: 0 0 4px; font-size: 32px; line-height: 1.05; font-weight: 800; letter-spacing: -.03em; color: #0B1026; }
+  .doc-body .meta { margin: 0 0 16px; color: #8B90A5; font-size: 13px; }
+  table.profile-meta { margin: 0 0 22px; background: #F4F6FB; }
+  table.profile-meta td { width: 33.33%; border: 0; background: #F4F6FB; padding: 12px 14px; vertical-align: top; }
+  table.profile-meta span { display: block; color: #873CFF; font-size: 10px; font-weight: 700; letter-spacing: .08em; }
+  table.profile-meta strong { display: block; margin-top: 4px; color: #1A2042; font-size: 13px; font-weight: 600; }
+  h2.section-title { margin: 20px 0 0; padding: 0 0 8px; border-bottom: 2px solid #873CFF; font-size: 18px; font-weight: 800; color: #0B1026; }
+  table.pair { margin: 14px 0 8px; }
+  table.pair td { width: 50%; border: 0; background: transparent; padding: 0 28px 0 0; vertical-align: top; }
+  table.pair td + td { padding: 0 0 0 12px; }
+  table.pair h3 { margin: 0 0 8px; color: #873CFF; font-size: 11px; font-weight: 700; letter-spacing: .08em; }
+  table.pair p { margin: 0 0 5px; color: #1A2042; font-size: 13px; }
+  table.brand { width: 100%; margin: 12px 0 0; border: 1px solid #E4E7F0; }
+  table.brand th { width: 28%; background: #F4F6FB; color: #1A2042; font-size: 13px; font-weight: 600; letter-spacing: 0; text-transform: none; padding: 10px 14px; border-bottom: 1px solid #E4E7F0; }
+  table.brand td { background: #fff; color: #1A2042; font-size: 13px; font-weight: 500; padding: 10px 14px; border-bottom: 1px solid #E4E7F0; }
+  table.brand tr:last-child th, table.brand tr:last-child td { border-bottom: 0; }
+  table.credentials { margin-top: 14px; border: 1px solid #E4E7F0; }
+  table.credentials th { background: #1A2042; color: #fff; font-size: 11px; letter-spacing: .08em; padding: 10px 14px; }
+  table.credentials td { padding: 11px 14px; font-size: 13px; color: #1A2042; border-bottom: 1px solid #E8EAF2; }
+  table.credentials td:first-child { width: 30%; font-weight: 700; background: #F4F6FB; }
+  table.credentials tbody tr:nth-child(odd) td:last-child { background: #fff; }
+  table.credentials tbody tr:nth-child(even) td:last-child { background: #F7F8FC; }
+  .note { margin: 12px 0 0; color: #873CFF; font-size: 12px; }
+`;
+
 export function infoDocHtml(client) {
   const social = client.social || {};
+  const brand = client.brandName || "Client";
+  const project = client.projectId || "—";
   return wrapLetterhead({
-    title: `${client.brandName || "Client"} info doc`,
+    title: `${brand} client profile`,
+    profile: true,
+    cover: { preparedFor: brand },
+    extraCss: PROFILE_CSS,
     body: `
-      <p class="kicker">Client info doc</p>
-      <h1>${escapeHtml(client.brandName || "Client")}</h1>
-      <p class="meta">Project ID ${escapeHtml(client.projectId || "—")}</p>
-      <h2>Client details</h2>
-      <ul>
-        <li>Main contact: ${escapeHtml(contactLine(client.mainContactName, client.mainContactTitle))}</li>
-        <li>Assigned contact: ${escapeHtml(contactLine(client.assignedContactName, client.assignedContactTitle))}</li>
-      </ul>
-      <h2>Business details</h2>
-      <ul>
-        <li>Legal name: ${escapeHtml(client.legalName || "—")}</li>
-        <li>Industry: ${escapeHtml(client.industry || "—")}</li>
-        <li>Email: ${escapeHtml(client.email || "—")}</li>
-        <li>Phone: ${escapeHtml(client.phone || "—")}</li>
-        <li>Website: ${escapeHtml(client.website || "—")}</li>
-        <li>Address: ${escapeHtml(client.address || "—")}</li>
-        <li>Hours: ${escapeHtml(client.hours || "—")}</li>
-        <li>Preferred contact: ${escapeHtml(client.preferredContact || "—")}</li>
-      </ul>
-      <h2>Brand identity</h2>
-      <ul>
-        <li>Primary colour: ${escapeHtml(client.primaryColor || "—")}</li>
-        <li>Accent colours: ${escapeHtml(client.secondaryColors || "—")}</li>
-        <li>Fonts: ${escapeHtml(client.fonts || "—")}</li>
-        <li>Tagline: ${escapeHtml(client.tagline || "—")}</li>
-      </ul>
-      <h2>Social credentials</h2>
-      <ul>
-        ${socialLine("Business mail", social.email)}
-        ${socialLine("Facebook", social.facebook)}
-        ${socialLine("Instagram", social.instagram)}
-        ${socialLine("TikTok", social.tiktok)}
-        ${socialLine("YouTube", social.youtube)}
-        ${socialLine("LinkedIn", social.linkedin)}
-      </ul>
+      <h1>${escapeHtml(brand)}</h1>
+      <p class="meta">Client information profile  •  Project ID ${escapeHtml(project)}</p>
+      <table class="profile-meta"><tr>
+        <td><span>PREPARED BY</span><strong>Marketing team</strong></td>
+        <td><span>REPORT DATE</span><strong>${escapeHtml(formatCoverDate())}</strong></td>
+        <td><span>DATA SOURCE</span><strong>Client info document</strong></td>
+      </tr></table>
+      <h2 class="section-title">01&nbsp;&nbsp;Client and business details</h2>
+      <table class="pair"><tr>
+        <td>
+          <h3>CLIENT DETAILS</h3>
+          ${detailLine("Main contact", contactLine(client.mainContactName, client.mainContactTitle))}
+          ${detailLine("Assigned contact", contactLine(client.assignedContactName, client.assignedContactTitle))}
+        </td>
+        <td>
+          <h3>BUSINESS DETAILS</h3>
+          ${detailLine("Legal name", client.legalName)}
+          ${detailLine("Industry", client.industry)}
+          ${detailLine("Email", client.email)}
+          ${detailLine("Phone", client.phone)}
+          ${detailLine("Website", client.website)}
+          ${detailLine("Address", client.address)}
+          ${detailLine("Hours", client.hours)}
+          ${detailLine("Preferred contact", client.preferredContact)}
+        </td>
+      </tr></table>
+      <h2 class="section-title">02&nbsp;&nbsp;Brand identity</h2>
+      <table class="brand"><tbody>
+        <tr><th>Primary colour</th><td>${fieldValue(client.primaryColor)}</td></tr>
+        <tr><th>Accent colours</th><td>${fieldValue(client.secondaryColors)}</td></tr>
+        <tr><th>Fonts</th><td>${fieldValue(client.fonts)}</td></tr>
+        <tr><th>Tagline</th><td>${fieldValue(client.tagline)}</td></tr>
+      </tbody></table>
+      <div class="pdf-break">
+        <p class="meta">Social media and account credentials  •  Project ${escapeHtml(project)}</p>
+        <h2 class="section-title">03&nbsp;&nbsp;Social media credentials</h2>
+        <table class="credentials">
+          <thead><tr><th>Platform</th><th>Account details</th></tr></thead>
+          <tbody>
+            <tr><td>Business mail</td><td>${fieldValue(socialValue(social.email))}</td></tr>
+            <tr><td>Facebook</td><td>${fieldValue(socialValue(social.facebook))}</td></tr>
+            <tr><td>Instagram</td><td>${fieldValue(socialValue(social.instagram))}</td></tr>
+            <tr><td>TikTok</td><td>${fieldValue(socialValue(social.tiktok))}</td></tr>
+            <tr><td>YouTube</td><td>${fieldValue(socialValue(social.youtube))}</td></tr>
+            <tr><td>LinkedIn</td><td>${fieldValue(socialValue(social.linkedin))}</td></tr>
+          </tbody>
+        </table>
+        <p class="note"><strong>Note:</strong> Account details are reproduced as provided in the source document.</p>
+      </div>
     `,
   });
 }
@@ -433,31 +571,85 @@ export function planFileName(plan, clientName) {
   return `${fileSlug(`${clientName || "client"}-${plan.title || "content-plan"}`) || "content-plan"}.html`;
 }
 
+function planCell(value) {
+  const text = String(value ?? "").trim();
+  return escapeHtml(text || "—");
+}
+
+function planRows(posts) {
+  const rows = Array.isArray(posts) ? posts : [];
+  if (!rows.length) {
+    return `<tr><td colspan="5">No posts recorded for this month.</td></tr>`;
+  }
+  return rows.map((post) => `<tr>
+    <td>${planCell(formatDate(post.date) || "Date not set")}</td>
+    <td>${planCell(weekday(post.date))}</td>
+    <td>${planCell(formatTime(post.time))}</td>
+    <td>${planCell(post.topic || "Untitled")}</td>
+    <td>${planCell(postTypeLabel(post.type))}</td>
+  </tr>`).join("");
+}
+
+function adTable(ad = {}) {
+  const rows = [
+    ["Date", formatDate(ad.date)],
+    ["Day", weekday(ad.date)],
+    ["Time", formatTime(ad.time)],
+    ["Platforms", ad.platforms],
+    ["Ad type", ad.adType],
+    ["Objective", ad.objective],
+    ["Duration", ad.duration],
+    ["Target", ad.target],
+    ["Product", ad.product],
+    ["Offer", ad.offer],
+    ["Main message", ad.message],
+    ["Creative", ad.creative],
+  ].filter(([, value]) => String(value ?? "").trim());
+  if (!rows.length) return "";
+  return `
+    <h3>Paid ad campaign</h3>
+    <table class="ad-table">
+      <thead><tr><th>Detail</th><th>Value</th></tr></thead>
+      <tbody>${rows.map(([label, value]) => `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(value)}</td></tr>`).join("")}</tbody>
+    </table>
+  `;
+}
+
 export function planHtml(plan, clientName) {
   const notes = String(plan.confirmNotes || "").split("\n").map((line) => line.trim()).filter(Boolean);
   const months = (plan.months || []).map((month) => `
     <h2>${escapeHtml(month.label || "Month")}${month.theme ? ` · ${escapeHtml(month.theme)}` : ""}</h2>
     <p class="meta">${escapeHtml(periodLabel(month.startDate, month.endDate))}</p>
-    <ul>
-      ${(month.posts || []).map((post) => `<li>${escapeHtml([
-        formatDate(post.date) || "Date not set",
-        weekday(post.date),
-        formatTime(post.time),
-        "—",
-        post.topic || "Untitled",
-        `(${post.type || "Image"}, ${post.goal || "no goal"})`,
-      ].filter(Boolean).join(" "))}</li>`).join("") || "<li>—</li>"}
-    </ul>
-    <p>Paid ad: ${escapeHtml([
-      formatDate(month.ad?.date) || "date not set",
-      formatTime(month.ad?.time),
-      month.ad?.platforms,
-      month.ad?.adType,
-      month.ad?.objective,
-    ].filter(Boolean).join(" · "))}</p>
+    <table class="plan-table">
+      <thead>
+        <tr><th>Date</th><th>Day</th><th>Time</th><th>Topic</th><th>Type</th></tr>
+      </thead>
+      <tbody>${planRows(month.posts)}</tbody>
+    </table>
+    ${adTable(month.ad)}
   `).join("");
   return wrapLetterhead({
     title: plan.title || "Content plan",
+    skipCover: true,
+    cover: {
+      title: plan.title || "Content plan",
+      preparedFor: clientName || "Client",
+      period: periodLabel(plan.startDate, plan.endDate),
+      department: "Marketing",
+      source: "Content plan",
+      date: plan.endDate || plan.startDate,
+      preparedBy: "Marketing team",
+    },
+    extraCss: `
+      .plan-table { table-layout: fixed; }
+      .plan-table th:nth-child(1), .plan-table td:nth-child(1) { width: 18%; }
+      .plan-table th:nth-child(2), .plan-table td:nth-child(2) { width: 16%; }
+      .plan-table th:nth-child(3), .plan-table td:nth-child(3) { width: 14%; }
+      .plan-table th:nth-child(4), .plan-table td:nth-child(4) { width: 36%; }
+      .plan-table th:nth-child(5), .plan-table td:nth-child(5) { width: 16%; }
+      .plan-table td, .plan-table th, .ad-table td, .ad-table th { overflow-wrap: anywhere; }
+      .ad-table td:first-child { width: 28%; font-weight: 700; }
+    `,
     body: `
       <p class="kicker">Content plan</p>
       <h1>${escapeHtml(plan.title || "Content plan")}</h1>

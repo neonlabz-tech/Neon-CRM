@@ -1,7 +1,9 @@
 import { blankClient, clientDirectory, loadClients, nextClientCode, saveClients, syncClientsFromProjects, withClientCodes } from "./clients.js";
+import { loadUsers } from "./crm.js";
 import { blankClient as blankMarketingClient, loadMarketing, saveMarketing } from "./marketing.js";
-import { canonicalProjectCode, loadProjects, marketingProjects, nextCompanyProjectCode, saveProjects, syncMarketingProjectsFromDocs, withProjectCodes } from "./projects.js";
-import { loadIncomingProjects, quotesByServiceType, salesClientDirectory } from "./sales.js";
+import { canonicalProjectCode, linkedProjectForClient, loadProjects, marketingProjects, nextCompanyProjectCode, saveProjects, syncMarketingProjectsFromDocs, withProjectCodes } from "./projects.js";
+import { interestedServiceType, loadIncomingProjects, quotesByServiceType, salesClientDirectory, serviceTypeFromInterest, sharedLeadRows, startedPaymentClients } from "./sales.js";
+import { readAccount, sessionAccount } from "./scope.js";
 
 export function hasMarketingProject(client, projects) {
   const name = (client?.name || "").trim().toLowerCase();
@@ -205,11 +207,26 @@ function personName(value) {
 export function marketingServiceClients() {
   const byName = new Map();
 
+  const started = new Set(startedPaymentClients().map((item) => item.name.toLowerCase()));
+
   function merge(name, row) {
     const key = String(name || "").trim().toLowerCase();
-    if (!key) return;
+    if (!key || !started.has(key)) return;
     byName.set(key, takeFilled(byName.get(key) || { name: String(name).trim() }, row));
   }
+
+  startedPaymentClients().forEach((client) => {
+    const serviceType = serviceTypeFromInterest(client.service) || interestedServiceType(client.name);
+    if (serviceType !== "marketing" && serviceType !== "both") return;
+    merge(client.name, {
+      name: client.name,
+      clientCode: client.code || "",
+      email: client.email || "",
+      phone: client.phone || "",
+      address: client.address || "",
+      serviceType,
+    });
+  });
 
   quotesByServiceType(["marketing", "both"]).forEach((quote) => {
     merge(quote.client, {
@@ -223,14 +240,29 @@ export function marketingServiceClients() {
     });
   });
 
+  sharedLeadRows().forEach((lead) => {
+    const serviceType = serviceTypeFromInterest(lead.service);
+    if (serviceType !== "marketing" && serviceType !== "both") return;
+    const status = String(lead.status || "");
+    if (status && status !== "Converted") return;
+    merge(lead.business || lead.name, {
+      name: String(lead.business || lead.name || "").trim(),
+      email: lead.email || "",
+      phone: lead.phone || "",
+      address: lead.address || "",
+      serviceType,
+    });
+  });
+
   marketingProjects().forEach((project) => {
+    const linked = linkedProjectForClient(project.client);
     merge(project.client, {
       name: project.client,
-      projectId: canonicalProjectCode(project.code),
+      projectId: canonicalProjectCode(linked?.code || project.code),
       email: project.email || "",
       phone: project.phone || "",
       address: project.address || "",
-      serviceType: project.type,
+      serviceType: linked?.type === "both" ? "both" : project.type,
     });
   });
 
@@ -271,7 +303,58 @@ export function marketingServiceClients() {
     });
   });
 
-  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+  return [...byName.values()]
+    .map((row) => {
+      const linked = linkedProjectForClient(row.name);
+      const projectId = canonicalProjectCode(linked?.code) || row.projectId || "";
+      return projectId ? { ...row, projectId } : row;
+    })
+    .filter((row) => {
+      const type = serviceTypeFromInterest(row.serviceType) || row.serviceType;
+      if (type === "software") return false;
+      return type === "marketing" || type === "both" || Boolean(row.projectId);
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function visibleMarketingClients(localClients = []) {
+  const started = new Set(startedPaymentClients().map((item) => item.name.toLowerCase()));
+  const session = sessionAccount();
+  const seen = new Set();
+  const rows = [];
+  function add(doc) {
+    if (!doc) return;
+    const code = (canonicalProjectCode(doc.projectId) || String(doc.projectId || "").trim()).toLowerCase();
+    const name = String(doc.brandName || "").trim().toLowerCase();
+    if (!started.has(name)) return;
+    const key = code || name;
+    if (!key || seen.has(key)) return;
+    if (!isVisibleToMarketing(doc)) return;
+    seen.add(key);
+    rows.push(doc);
+  }
+  (localClients || []).forEach(add);
+  loadUsers()
+    .filter((user) => user.active && user.username !== session?.username && (user.role === "marketing" || user.role === "pm"))
+    .forEach((user) => {
+      const stored = readAccount("neon-crm-marketing", user.username);
+      (Array.isArray(stored?.clients) ? stored.clients : []).forEach(add);
+    });
+  marketingProjects().forEach((project) => {
+    add({
+      ...blankMarketingClient(),
+      id: project.marketingId || project.id,
+      projectId: canonicalProjectCode(project.code) || project.code || "",
+      brandName: project.client || project.name,
+      mainContactName: project.client || "Pending",
+      email: project.email || "",
+      phone: project.phone || "",
+      address: project.address || "",
+      pmClientId: project.clientId || "",
+      origin: "pm",
+    });
+  });
+  return rows;
 }
 
 export function marketingFieldsFromPm(choice) {
