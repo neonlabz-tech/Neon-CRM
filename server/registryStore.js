@@ -107,6 +107,39 @@ function keptLeadIds(savedHighest, ids, { keepReservations = true } = {}) {
   return keep;
 }
 
+async function savedProjectCodes() {
+  const codes = new Set();
+  const remember = (code) => {
+    const number = codeNumber("NPRJ", code);
+    if (number) codes.add(formatCode("NPRJ", 3, number));
+  };
+  const projects = await Store.find({ key: "neon-crm-projects" }).select("data.projects.code").lean();
+  projects.forEach((doc) => {
+    (doc.data?.projects || []).forEach((project) => remember(project?.code));
+  });
+  const marketing = await Store.find({ key: "neon-crm-marketing" }).select("data.clients.projectId").lean();
+  marketing.forEach((doc) => {
+    (doc.data?.clients || []).forEach((client) => remember(client?.projectId));
+  });
+  return codes;
+}
+
+async function dropUnusedProjectIds() {
+  const saved = await savedProjectCodes();
+  const registry = await readRegistry();
+  const unset = {};
+  Object.keys(registry.projects.ids || {}).forEach((id) => {
+    const number = codeNumber("NPRJ", id);
+    const canonicalId = number ? formatCode("NPRJ", 3, number) : "";
+    if (!saved.has(canonicalId)) unset[`data.projects.ids.${id}`] = "";
+  });
+  const sequence = [...saved].reduce((max, id) => Math.max(max, codeNumber("NPRJ", id)), 0);
+  if (!Object.keys(unset).length && (registry.projects.sequence || 0) === sequence) return;
+  const update = { $set: { "data.projects.sequence": sequence } };
+  if (Object.keys(unset).length) update.$unset = unset;
+  await Store.updateOne({ key: REGISTRY_KEY, owner: COMPANY }, update);
+}
+
 async function dropPhantomLeadIds() {
   const highest = await highestSavedLeadNumber();
   const registry = await readRegistry();
@@ -412,21 +445,35 @@ export function keepExistingSalesLeads(incoming, stored) {
   const storedLeads = Array.isArray(stored?.leads) ? stored.leads.filter((lead) => lead?.id) : [];
   const storedIds = new Set(storedLeads.map((lead) => String(lead.id)));
   const incomingLeads = Array.isArray(incoming?.leads) ? incoming.leads : [];
-  const seen = new Set(storedIds);
-  const additions = [];
+  const incomingById = new Map();
+  incomingLeads.forEach((lead) => {
+    const id = String(lead?.id || "");
+    if (id) incomingById.set(id, lead);
+  });
+  const seen = new Set();
+  const leads = [];
+  storedLeads.forEach((lead) => {
+    const id = String(lead.id);
+    seen.add(id);
+    leads.push(incomingById.get(id) || lead);
+  });
   incomingLeads.forEach((lead) => {
     const id = String(lead?.id || "");
     if (!id || seen.has(id)) return;
     seen.add(id);
-    additions.push(lead);
+    leads.push(lead);
   });
   const storedFollow = Array.isArray(stored?.followUps) ? stored.followUps : [];
   const incomingFollow = Array.isArray(incoming?.followUps) ? incoming.followUps : [];
   const followUps = [
-    ...storedFollow.filter((item) => item?.id && storedIds.has(String(item.id))),
+    ...storedLeads.flatMap((lead) => {
+      const id = String(lead.id);
+      const source = incomingById.has(id) ? incomingFollow : storedFollow;
+      return source.filter((item) => item?.id && String(item.id) === id);
+    }),
     ...incomingFollow.filter((item) => item?.id && !storedIds.has(String(item.id))),
   ];
-  return { ...incoming, leads: [...storedLeads, ...additions], followUps };
+  return { ...incoming, leads, followUps };
 }
 
 export function assignUniqueLeadIds(data, floor = 0, storedLeads = undefined) {

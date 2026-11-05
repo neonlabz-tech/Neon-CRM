@@ -93,7 +93,7 @@ export function wrapLetterhead({ title, body, extraCss = "", cover = {}, profile
     .meta { color: #69708A; margin-bottom: 12px; }
     table { width: 100%; border-collapse: collapse; margin: 0 0 14px; }
     th, td { text-align: left; padding: 7px 8px; vertical-align: top; }
-    th { background: #873CFF; color: #fff; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+    th { background: #F4F6FB; color: #1A2042; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; border-bottom: 1px solid #E2E5F0; }
     td { border-bottom: 1px solid #E6E8F2; font-size: 12px; }
     tbody tr:nth-child(even) td { background: #F7F8FC; }
     .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }

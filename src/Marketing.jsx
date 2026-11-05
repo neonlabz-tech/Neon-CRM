@@ -154,6 +154,7 @@ function taskStatusLabel(status) {
 }
 
 function MarketingProjectMonitor() {
+  const pmView = sessionAccount()?.role === "pm";
   const projects = useMemo(() => {
     publishClients();
     return marketingProjects();
@@ -264,7 +265,7 @@ function MarketingProjectMonitor() {
                   <th>Due</th>
                   <th>Tasks</th>
                   <th>Status</th>
-                  <th></th>
+                  {pmView ? null : <th></th>}
                 </tr>
               </thead>
               <tbody>
@@ -288,7 +289,7 @@ function MarketingProjectMonitor() {
                           {complete || item.status === "done" ? "Completed" : (MILESTONE_STATUS[item.status] || "Pending")}
                         </span>
                       </td>
-                      <td><button className="ghost" type="button" onClick={() => setOpenMilestoneId(item.id)}>Open</button></td>
+                      {pmView ? null : <td><button className="ghost" type="button" onClick={() => setOpenMilestoneId(item.id)}>Open</button></td>}
                     </tr>
                   );
                 })}
@@ -322,7 +323,7 @@ function MarketingProjectMonitor() {
               <th>Team</th>
               <th>Milestones</th>
               <th>Tasks</th>
-              <th></th>
+              {pmView ? null : <th></th>}
             </tr>
           </thead>
           <tbody>
@@ -342,9 +343,11 @@ function MarketingProjectMonitor() {
                   <td>{team.length ? team.map((code) => personName(people, code)).join(", ") : "—"}</td>
                   <td>{(item.milestones || []).length}</td>
                   <td>{rows.length === 0 ? "No tasks" : `${done} of ${rows.length} done`}</td>
-                  <td>
-                    <button className="ghost" type="button" onClick={() => { setOpenKey(`${item.owner}:${item.id}`); setOpenMilestoneId(""); }}>Open</button>
-                  </td>
+                  {pmView ? null : (
+                    <td>
+                      <button className="ghost" type="button" onClick={() => { setOpenKey(`${item.owner}:${item.id}`); setOpenMilestoneId(""); }}>Open</button>
+                    </td>
+                  )}
                 </tr>
               );
             })}

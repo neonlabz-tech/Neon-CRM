@@ -1746,11 +1746,6 @@ function FollowUpPanel({ data, commit, canEdit, executives, username, month, all
   const canRemove = canEdit && allowDelete;
 
   function save(draft) {
-    if (!draft?.unsaved) {
-      const locked = "Existing leads cannot be changed.";
-      setError(locked);
-      return locked;
-    }
     const result = saveLead(data, {
       ...draft,
       executive: draft.executive || defaultExecutive(executives, username),
@@ -1870,8 +1865,9 @@ function FollowUpPanel({ data, commit, canEdit, executives, username, month, all
         <LeadRegister
           leads={leads.map((lead) => ({ ...lead, owner: lead.executive || username }))}
           canEdit={canEdit}
-          canRevise={false}
+          canRevise={canEdit}
           canDelete={false}
+          showPerson={false}
           staff={executives}
           onOpen={(lead) => { setOpen(lead); setError(""); }}
           onAdd={canEdit ? () => { setOpen(blankLead(defaultExecutive(executives, username), month, reserveNextLeadId())); setError(""); setNotice(""); } : undefined}
@@ -1883,7 +1879,7 @@ function FollowUpPanel({ data, commit, canEdit, executives, username, month, all
         <LeadDialog
           lead={open}
           executives={executives}
-          canEdit={canEdit && Boolean(open.unsaved)}
+          canEdit={canEdit}
           error={error}
           onClose={() => setOpen(null)}
           onSave={save}
@@ -1931,7 +1927,7 @@ function LeadDialog({ lead, executives, canEdit, error, onClose, onSave, onDelet
     <SalesModal onClose={onClose}>
       <form className="modal sheet" onSubmit={submit}>
         <h2>{existing ? "Lead profile & follow-ups" : "Add lead"}</h2>
-        {existing && !canEdit ? <p className="page-note">This lead is view only. Sales admins cannot change or delete a lead after it is saved.</p> : null}
+        {existing && !canEdit ? <p className="page-note">This lead is view only.</p> : null}
         <fieldset className="plain-fieldset" disabled={!canEdit}>
         <div className="sales-grid">
           <label>

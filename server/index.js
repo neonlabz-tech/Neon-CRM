@@ -200,30 +200,10 @@ function sharedDeliveryStores(stores, user) {
     }
     if (item.key === "neon-crm-marketing") {
       const clients = Array.isArray(item.data?.clients) ? item.data.clients : [];
-      if (!clients.length) continue;
-      if (user.role === "pm") {
-        extra.push({
-          key: item.key,
-          owner: item.owner,
-          data: {
-            clients: clients.map((doc) => ({
-              id: doc.id,
-              projectId: doc.projectId || "",
-              brandName: doc.brandName || "",
-              mainContactName: doc.mainContactName || "",
-              email: doc.email || "",
-              phone: doc.phone || "",
-              address: doc.address || "",
-              pmClientId: doc.pmClientId || "",
-              origin: doc.origin || "",
-            })),
-            plans: [],
-            reports: [],
-          },
-        });
-      } else {
-        extra.push({ key: item.key, owner: item.owner, data: item.data });
-      }
+      const plans = Array.isArray(item.data?.plans) ? item.data.plans : [];
+      const reports = Array.isArray(item.data?.reports) ? item.data.reports : [];
+      if (!clients.length && !plans.length && !reports.length) continue;
+      extra.push({ key: item.key, owner: item.owner, data: item.data });
     }
   }
   return extra;
