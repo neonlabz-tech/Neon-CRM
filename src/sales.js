@@ -1,6 +1,6 @@
-import neonLogo from "./assets/neonlabz-logo.png";
+import { wrapLetterhead } from "./letterhead.js";
 import { blankClient, loadClients, nextClientCode, saveClients } from "./clients.js";
-import { claimClientCode, claimLeadId as reserveLeadId, forgetLeadPhone, leadIdTaken, leadPhoneHolder, noteClientCode, noteLeadId, rememberLeadPhone, suggestLeadId, syncLeadPhones } from "./registry.js";
+import { claimClientCode, forgetLeadPhone, leadPhoneHolder, noteClientCode, noteClientCodes, noteLeadIds, rememberLeadPhone, syncLeadPhones } from "./registry.js";
 import { formatScopeHtml, sanitizeScopeHtml, scopeHasText } from "./richText.js";
 import { loadUsers } from "./crm.js";
 import { invoiceDocumentFromPayment, invoiceDocumentFromQuote } from "./brandDocument.js";
@@ -27,7 +27,7 @@ export const SERVICES = [
 export const PRICE_BASIS = ["Per project", "Per month", "3 months"];
 
 export const LEAD_STAGES = ["New", "Connected", "Interested", "Quotation Sent", "Demo Scheduled", "Payment Promised", "Follow-up", "Converted", "Lost"];
-export const LEAD_SOURCES = ["Google Maps", "Facebook", "Instagram", "Referral", "Website", "Other"];
+export const LEAD_SOURCES = ["Google Maps", "Facebook", "Instagram", "TikTok", "Referral", "Website", "Other"];
 export const LEAD_SERVICES = ["Software development", "Marketing", "Both"];
 
 export function leadServiceOptions(current) {
@@ -127,6 +127,19 @@ export function todayISO() {
   }).format(new Date());
 }
 
+export function minSelectableDate(existing = "") {
+  const today = todayISO();
+  const kept = String(existing || "").slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(kept) && kept < today) return kept;
+  return today;
+}
+
+export function dateIsAllowed(value, existing = "") {
+  const day = String(value || "").slice(0, 10);
+  if (!day) return true;
+  return day >= minSelectableDate(existing);
+}
+
 const MISSION_RESET_HOUR = 8;
 const COLOMBO_OFFSET = "+05:30";
 
@@ -217,6 +230,22 @@ export function formatQuoteDate(iso) {
   const date = new Date(`${iso}T12:00:00`);
   if (Number.isNaN(date.getTime())) return String(iso);
   return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(date);
+}
+
+export function discountPercentOf(quote) {
+  const stored = Number(quote?.discountPercent);
+  if (Number.isFinite(stored) && stored >= 0) return Math.round(stored * 10) / 10;
+  const price = Number(quote?.price) || 0;
+  const discount = Number(quote?.discount) || 0;
+  if (price <= 0 || discount <= 0) return 0;
+  return Math.round((discount / price) * 1000) / 10;
+}
+
+export function moneyFromPercent(subtotal, percent) {
+  const price = Math.round((Number(subtotal) || 0) * 100) / 100;
+  const rate = Number(percent);
+  if (!Number.isFinite(rate) || rate <= 0 || price <= 0) return 0;
+  return Math.round(price * Math.min(rate, 100) / 100 * 100) / 100;
 }
 
 export function formatDiscountPercent(percent) {
@@ -406,8 +435,8 @@ function normalizeSales(raw) {
     goals: {
       monthly: dropDummy(numberOr(raw.goals?.monthly, 0), DUMMY_GOALS.monthly, 0),
       projects: dropDummy(numberOr(raw.goals?.projects, 0), DUMMY_GOALS.projects, 0),
-      daily: dropDummy(numberOr(raw.goals?.daily, 0), DUMMY_GOALS.daily, 0),
-      leadTarget: dropDummy(numberOr(raw.goals?.leadTarget, 0), DUMMY_GOALS.leadTarget, 0),
+      daily: numberOr(raw.goals?.daily, 0),
+      leadTarget: numberOr(raw.goals?.leadTarget, 0),
     },
     campaign: {
       name: dropDummy(String(raw.campaign?.name || ""), DUMMY_CAMPAIGN.name, ""),
@@ -493,6 +522,7 @@ function normalizeQuote(item) {
     period: periods.length === 1 ? periods[0] : periods.length ? "Mixed" : String(item.period || ""),
     price: figures.subtotal,
     discount: figures.discount,
+    ...(Number.isFinite(Number(item.discountPercent)) ? { discountPercent: Number(item.discountPercent) } : {}),
     total: figures.grand,
     scope: items.map((line) => `${line.packageName}\n${line.scope}`).join("\n\n"),
     terms: String(item.terms || ""),
@@ -609,12 +639,14 @@ function mapLeadStatus(value) {
 
 function normalizeCall(item) {
   if (!item) return null;
+  const createdAt = String(item.createdAt || "");
   return {
     date: String(item.date || ""),
     outcome: CALL_OUTCOMES.includes(item.outcome) ? item.outcome : "Answered",
     status: mapLeadStatus(item.status),
     next: String(item.next || ""),
     note: String(item.note || ""),
+    createdAt: Number.isNaN(new Date(createdAt).getTime()) ? "" : createdAt,
   };
 }
 
@@ -639,6 +671,7 @@ function normalizeLead(item) {
     notes: String(item.notes || ""),
     executive: String(item.executive || ""),
     clientCode: String(item.clientCode || "").trim(),
+    createdAt: String(item.createdAt || ""),
     contact: email && phone ? `${email} · ${phone}` : String(item.contact || phone || email),
     calls: Array.isArray(item.calls) ? item.calls.map(normalizeCall).filter(Boolean) : [],
   };
@@ -718,6 +751,7 @@ function directoryLead(lead, owner) {
     address: lead.address || "",
     phone: lead.phone || "",
     email: lead.email || "",
+    service: lead.service || "",
     status: lead.status || "",
     owner,
     date: lead.date || "",
@@ -736,13 +770,11 @@ function directoryLeads() {
 
 function publishLeadDirectory() {
   const harvested = harvestLeadIndex();
-  const stored = loadLeadIndex();
-  const ids = { ...stored.ids, ...harvested.ids };
-  Object.keys(ids).forEach((id) => noteLeadId(id));
+  noteLeadIds(Object.keys(harvested.ids));
   syncLeadPhones(harvested.phones);
   saveLeadIndex({
-    sequence: Math.max(harvested.sequence, stored.sequence),
-    ids,
+    sequence: harvested.sequence,
+    ids: harvested.ids,
     leads: directoryLeads(),
   });
 }
@@ -763,19 +795,6 @@ function harvestLeadIndex() {
   return { sequence, ids, phones };
 }
 
-function loadLeadIndex() {
-  try {
-    const raw = JSON.parse(crmStorage.getItem(LEAD_INDEX_KEY) || "null");
-    if (!raw || typeof raw !== "object") return { sequence: 0, ids: {} };
-    return {
-      sequence: Number(raw.sequence) || 0,
-      ids: raw.ids && typeof raw.ids === "object" ? raw.ids : {},
-    };
-  } catch {
-    return { sequence: 0, ids: {} };
-  }
-}
-
 function saveLeadIndex(index) {
   crmStorage.setItem(LEAD_INDEX_KEY, JSON.stringify({
     sequence: index.sequence,
@@ -784,35 +803,49 @@ function saveLeadIndex(index) {
   }));
 }
 
-function claimLeadId(preferred) {
-  const harvested = harvestLeadIndex();
-  const stored = loadLeadIndex();
-  Object.keys({ ...stored.ids, ...harvested.ids }).forEach((id) => noteLeadId(id));
-  syncLeadPhones(harvested.phones);
-  const wanted = String(preferred || "").trim();
-  const free = wanted && !harvested.ids[wanted] && !stored.ids[wanted] && !leadIdTaken(wanted);
-  const id = reserveLeadId(free ? wanted : "");
-  saveLeadIndex({
-    sequence: Math.max(harvested.sequence, stored.sequence, leadIdNumber(id)),
-    ids: { ...stored.ids, ...harvested.ids, [id]: true },
-  });
-  return id;
+export function nextLeadId() {
+  return previewNextLeadId();
 }
 
-export function nextLeadId() {
-  const harvested = harvestLeadIndex();
-  const stored = loadLeadIndex();
-  Object.keys({ ...stored.ids, ...harvested.ids }).forEach((id) => noteLeadId(id));
-  syncLeadPhones(harvested.phones);
-  return suggestLeadId();
+export function previewNextLeadId(data) {
+  let number = harvestLeadIndex().sequence;
+  (data?.leads || []).forEach((lead) => {
+    number = Math.max(number, leadIdNumber(lead?.id));
+  });
+  return formatLeadId(number + 1);
+}
+
+export function reserveNextLeadId(data) {
+  return previewNextLeadId(data);
+}
+
+export function leadPhoneConflict(phone, exceptId = "") {
+  const digits = phoneDigits(phone);
+  if (digits.length !== 10) return null;
+  let found = null;
+  eachSalesAccount((raw) => {
+    if (found) return;
+    (raw?.leads || []).some((lead) => {
+      if (!lead?.id || lead.id === exceptId) return false;
+      if (phoneDigits(lead.phone) !== digits) return false;
+      found = { id: lead.id, business: String(lead.business || lead.name || "").trim() };
+      return true;
+    });
+  });
+  if (found) return found;
+  const holder = harvestLeadIndex().phones[digits] || leadPhoneHolder(phone);
+  if (holder && holder !== exceptId) return { id: holder, business: "" };
+  return null;
+}
+
+export function leadPhoneConflictMessage(phone, exceptId = "") {
+  const conflict = leadPhoneConflict(phone, exceptId);
+  if (!conflict) return "";
+  return `This phone number is already added in lead ${conflict.id}.`;
 }
 
 export function leadPhoneTaken(phone, exceptId = "") {
-  const digits = phoneDigits(phone);
-  if (digits.length !== 10) return false;
-  const local = harvestLeadIndex().phones[digits];
-  const shared = leadPhoneHolder(phone);
-  return [local, shared].some((holder) => holder && holder !== exceptId);
+  return Boolean(leadPhoneConflict(phone, exceptId));
 }
 
 export function dueLeads(leads, day = todayISO()) {
@@ -1163,6 +1196,59 @@ function addPayingClient(byName, next) {
   });
 }
 
+function mapPayingClient(item) {
+  return {
+    name: String(item?.name || "").trim(),
+    code: String(item?.code || "").trim(),
+    email: String(item?.email || "").trim(),
+    phone: String(item?.phone || "").trim(),
+    address: String(item?.address || "").trim(),
+    service: String(item?.service || "").trim(),
+  };
+}
+
+function startedRowsFromSales() {
+  const byName = new Map();
+  loadUsers()
+    .filter((item) => item.active && item.role === "sales")
+    .forEach((salesUser) => {
+      const sales = readSalesAccount(salesUser.username);
+      (sales?.payments || []).forEach((payment) => {
+        if (!payment || payment.status === "cancelled") return;
+        const quote = (sales?.quotes || []).find((item) => item.id === payment.quoteId);
+        const name = String(payment.clientName || quote?.client || "").trim();
+        if (!name) return;
+        const key = name.toLowerCase();
+        const lead = (sales?.leads || []).find((item) => item.id === payment.clientId || item.id === quote?.clientId)
+          || (sales?.leads || []).find((item) => String(item.business || "").trim().toLowerCase() === key);
+        const current = byName.get(key) || { name };
+        byName.set(key, {
+          name,
+          code: current.code || lead?.clientCode || quote?.clientCode || payment.clientCode || "",
+          email: current.email || lead?.email || quote?.email || "",
+          phone: current.phone || lead?.phone || quote?.phone || "",
+          address: current.address || lead?.address || quote?.address || "",
+          service: current.service || lead?.service || "",
+        });
+      });
+    });
+  return [...byName.values()];
+}
+
+export function startedPaymentClients() {
+  const shared = sharedPayingClients().map(mapPayingClient).filter((item) => item.name);
+  if (sessionAccount()?.role !== "ceo") {
+    return shared.sort((a, b) => a.name.localeCompare(b.name));
+  }
+  const byName = new Map(shared.map((item) => [item.name.toLowerCase(), item]));
+  startedRowsFromSales().forEach((item) => {
+    const key = item.name.toLowerCase();
+    const current = byName.get(key) || {};
+    byName.set(key, { ...current, ...item, service: item.service || current.service || "" });
+  });
+  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
 export function payingClientsForPm(username) {
   const user = loadUsers().find((item) => item.active && item.username === username);
   if (!user || user.role !== "pm") return [];
@@ -1175,8 +1261,6 @@ export function payingClientsForPm(username) {
       const sales = readSalesAccount(salesUser.username);
       (sales?.payments || []).forEach((payment) => {
         if (!payment || payment.status === "cancelled") return;
-        const approved = payment.approval === "approved" || (payment.status === "confirmed" && payment.approval !== "pending");
-        if (!approved) return;
         sawSalesPayment = true;
         const quote = (sales?.quotes || []).find((item) => item.id === payment.quoteId);
         const name = String(payment.clientName || quote?.client || "").trim();
@@ -1236,11 +1320,19 @@ export function successfulPaymentClients(followUps) {
   return convertedPaymentClients({ followUps, leads: [], quotes: [] });
 }
 
+function clientCodeNumber(code) {
+  const match = /^CLI(\d+)$/i.exec(String(code || "").trim());
+  return match ? Number(match[1]) : 0;
+}
+
 export function convertedClients(data) {
   return (data?.leads || [])
     .filter((lead) => lead.status === "Converted" && String(lead.business || "").trim())
     .slice()
-    .sort((a, b) => a.business.localeCompare(b.business));
+    .sort((a, b) => {
+      const byCode = (clientCodeNumber(a.clientCode) || Number.MAX_SAFE_INTEGER) - (clientCodeNumber(b.clientCode) || Number.MAX_SAFE_INTEGER);
+      return byCode || leadIdNumber(a.id) - leadIdNumber(b.id) || a.business.localeCompare(b.business);
+    });
 }
 
 export function convertedPaymentClients(data) {
@@ -1272,23 +1364,39 @@ export function convertedPaymentClients(data) {
     }));
 }
 
-function nextSalesClientCode(data) {
-  (data?.leads || []).forEach((lead) => noteClientCode(lead.clientCode));
-  (data?.quotes || []).forEach((quote) => noteClientCode(quote.clientCode));
-  eachSalesAccount((raw) => {
-    (raw?.leads || []).forEach((lead) => noteClientCode(lead?.clientCode));
-    (raw?.quotes || []).forEach((quote) => noteClientCode(quote?.clientCode));
+function collectedClientCodes(data, codes) {
+  (data?.leads || []).forEach((lead) => {
+    if (lead?.status === "Converted" && lead.clientCode) codes.push(lead.clientCode);
   });
+  (data?.quotes || []).forEach((quote) => {
+    if (quote?.clientCode) codes.push(quote.clientCode);
+  });
+}
+
+function nextSalesClientCode(data) {
+  const codes = [];
+  collectedClientCodes(data, codes);
+  eachSalesAccount((raw) => collectedClientCodes(raw, codes));
+  noteClientCodes(codes);
   return claimClientCode();
 }
 
 export function assignConvertedClientCodes(data) {
+  const leads = (data?.leads || []).map((lead) => ({ ...lead }));
   let changed = false;
-  const leads = (data?.leads || []).map((lead) => {
-    if (lead.clientCode) noteClientCode(lead.clientCode);
-    if (lead.status !== "Converted" || lead.clientCode) return lead;
+  leads.forEach((lead) => {
+    if (lead.status === "Converted" || !lead.clientCode) return;
+    lead.clientCode = "";
     changed = true;
-    return { ...lead, clientCode: claimClientCode() };
+  });
+  sortLeadsById(leads).forEach((lead) => {
+    if (lead.status !== "Converted") return;
+    if (lead.clientCode) {
+      noteClientCode(lead.clientCode);
+      return;
+    }
+    lead.clientCode = claimClientCode();
+    changed = true;
   });
   return changed ? { ...data, leads } : data;
 }
@@ -1397,16 +1505,22 @@ function quoteFromDraft(data, draft) {
   const converted = (data.leads || []).find((lead) => lead.id === draft.clientId && lead.status === "Converted");
   const salesQuote = Boolean(converted);
   const client = String(salesQuote ? converted.business : draft.client || "").trim();
-  const discount = Number(draft.discount);
+  const discountPercent = Number(draft.discount);
   if (!salesQuote && (!draft.projectId || !client)) return { ok: false, error: "Choose a project." };
   if (salesQuote && !client) return { ok: false, error: "Choose a converted client." };
   if (!draft.date) return { ok: false, error: "Quotation date is required." };
+  const previousQuote = (data.quotes || []).find((item) => item.id && item.id === draft.id);
+  if (!dateIsAllowed(draft.date, previousQuote?.date || "")) {
+    return { ok: false, error: "Quotation date cannot be before today." };
+  }
   const valid = draft.valid || (salesQuote ? addDays(draft.date, 14) : "");
+  if (valid && !dateIsAllowed(valid, previousQuote?.valid || "")) {
+    return { ok: false, error: "Validity date cannot be before today." };
+  }
   if (!salesQuote && !valid) return { ok: false, error: "Quotation date and validity are required." };
   if (valid && valid < draft.date) return { ok: false, error: "Validity date cannot be before the quotation date." };
   if (emailError(draft.email)) return { ok: false, error: EMAIL_ERROR };
   if (phoneError(draft.phone)) return { ok: false, error: PHONE_ERROR };
-  if (valid && valid < draft.date) return { ok: false, error: "Validity date cannot be before the quotation date." };
   const lines = Array.isArray(draft.lines) ? draft.lines : [];
   if (!lines.length) return { ok: false, error: "Add at least one package." };
   const items = [];
@@ -1429,18 +1543,20 @@ function quoteFromDraft(data, draft) {
     });
   }
   const subtotal = Math.round(items.reduce((sum, line) => sum + line.price, 0) * 100) / 100;
-  if (!Number.isFinite(discount) || discount < 0 || discount >= subtotal) {
-    return { ok: false, error: "Discount must be less than the quotation value." };
+  if (!Number.isFinite(discountPercent) || discountPercent < 0 || discountPercent > 100) {
+    return { ok: false, error: "Offer must be a percentage from 0 to 100." };
   }
+  const discount = moneyFromPercent(subtotal, discountPercent);
   const figures = salesQuote
     ? {
       subtotal,
-      discount: Number.isFinite(discount) && discount > 0 ? discount : 0,
-      net: Math.max(0, subtotal - (Number.isFinite(discount) && discount > 0 ? discount : 0)),
+      discount,
+      net: Math.max(0, Math.round((subtotal - discount) * 100) / 100),
       vat: 0,
-      grand: Math.round(Math.max(0, subtotal - (Number.isFinite(discount) && discount > 0 ? discount : 0)) * 100) / 100,
+      grand: Math.max(0, Math.round((subtotal - discount) * 100) / 100),
+      percent: discountPercent,
     }
-    : quotationFigures(subtotal, discount);
+    : { ...quotationFigures(subtotal, discount), percent: discountPercent };
   const terms = String(draft.terms || "").trim() || (salesQuote ? "As agreed with the client." : "");
   if (!terms) return { ok: false, error: "Payment terms are required." };
   const periods = [...new Set(items.map((line) => line.period))];
@@ -1467,6 +1583,7 @@ function quoteFromDraft(data, draft) {
       period: periods.length === 1 ? periods[0] : "Mixed",
       price: figures.subtotal,
       discount: figures.discount,
+      discountPercent,
       total: figures.grand,
       scope: items.map((line) => `${line.packageName}\n${line.scope}`).join("\n\n"),
       terms,
@@ -1699,11 +1816,29 @@ export function setPaymentStatus(data, paymentId, status, receipt) {
   };
 }
 
+function csvDelimiter(text) {
+  const line = String(text || "").replace(/^\uFEFF/, "").split(/\r?\n/, 1)[0] || "";
+  const counts = { ",": 0, "\t": 0, ";": 0 };
+  let quoted = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (char === "\"") {
+      if (quoted && line[index + 1] === "\"") index += 1;
+      else quoted = !quoted;
+    } else if (!quoted && Object.prototype.hasOwnProperty.call(counts, char)) {
+      counts[char] += 1;
+    }
+  }
+  const [mark, count] = Object.entries(counts).sort((left, right) => right[1] - left[1])[0];
+  return count > 0 ? mark : ",";
+}
+
 function parseCsv(text) {
   const rows = [];
   let row = [];
   let cell = "";
   let quoted = false;
+  const delimiter = csvDelimiter(text);
   const source = String(text || "").replace(/^\uFEFF/, "");
   for (let index = 0; index < source.length; index += 1) {
     const char = source[index];
@@ -1718,7 +1853,7 @@ function parseCsv(text) {
       }
     } else if (char === "\"") {
       quoted = true;
-    } else if (char === ",") {
+    } else if (char === delimiter) {
       row.push(cell);
       cell = "";
     } else if (char === "\n") {
@@ -1741,9 +1876,18 @@ function csvDate(value, fallback = todayISO()) {
   const raw = String(value || "").trim();
   if (!raw) return fallback;
   if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
-  const parts = raw.match(/^(\d{1,2})[/. -](\d{1,2})[/. -](\d{4})$/);
+  const parts = raw.match(/^(\d{1,2})[/. -](\d{1,2})[/. -](\d{2}|\d{4})$/);
   if (!parts) return fallback;
-  return `${parts[3]}-${parts[2].padStart(2, "0")}-${parts[1].padStart(2, "0")}`;
+  let day = Number(parts[1]);
+  let month = Number(parts[2]);
+  let year = Number(parts[3]);
+  if (parts[3].length === 2) year += year >= 70 ? 1900 : 2000;
+  if (month > 12 && day <= 12) [day, month] = [month, day];
+  if (month < 1 || month > 12 || day < 1 || day > 31) return fallback;
+  const iso = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  const check = new Date(`${iso}T00:00:00`);
+  if (check.getFullYear() !== year || check.getMonth() + 1 !== month || check.getDate() !== day) return fallback;
+  return iso;
 }
 
 const LEAD_CSV_FIELDS = {
@@ -1763,7 +1907,7 @@ const LEAD_CSV_FIELDS = {
 function csvHeaderMap(headers) {
   const map = {};
   headers.forEach((header, index) => {
-    const key = String(header || "").trim().toLowerCase();
+    const key = String(header || "").trim().toLowerCase().replace(/\s+/g, " ");
     Object.entries(LEAD_CSV_FIELDS).forEach(([field, names]) => {
       if (names.includes(key)) map[field] = index;
     });
@@ -1777,6 +1921,39 @@ function csvValue(row, map, field, fallback) {
   return index === undefined ? "" : row[index] || "";
 }
 
+function importedPhone(value) {
+  let digits = String(value || "").replace(/\D/g, "");
+  if (digits.startsWith("94") && digits.length > 10) digits = `0${digits.slice(2)}`;
+  if (digits.length === 9) digits = `0${digits}`;
+  return formatPhone(digits.slice(0, 10));
+}
+
+function importedService(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return "";
+  if (text.startsWith("soft")) return "Software development";
+  if (text.startsWith("market")) return "Marketing";
+  if (text.includes("both")) return "Both";
+  return LEAD_SERVICES.find((item) => item.toLowerCase() === text) || String(value || "").trim();
+}
+
+function importedSource(value) {
+  const text = String(value || "").trim().toLowerCase();
+  return LEAD_SOURCES.find((item) => item.toLowerCase() === text.replace(/\s+/g, "")) 
+    || LEAD_SOURCES.find((item) => item.toLowerCase() === text)
+    || (text ? "Other" : "Other");
+}
+
+function importedExtras(headers, row, map) {
+  const used = new Set(Object.values(map || {}));
+  return headers.flatMap((header, index) => {
+    if (used.has(index)) return [];
+    const label = String(header || "").trim();
+    const value = String(row[index] || "").trim();
+    return label && value ? [`${label}: ${value}`] : [];
+  }).join("\n");
+}
+
 export function importLeadsFromCsv(data, text, options = {}) {
   const rows = parseCsv(text);
   if (!rows.length) return { ok: false, error: "The CSV file has no lead rows." };
@@ -1786,6 +1963,7 @@ export function importLeadsFromCsv(data, text, options = {}) {
   let current = data;
   let imported = 0;
   const skipped = [];
+  const headers = map ? rows[0] : [];
   body.forEach((row, index) => {
     const line = (map ? index + 2 : index + 1);
     const business = String(csvValue(row, map, "business", 0)).trim();
@@ -1793,29 +1971,56 @@ export function importLeadsFromCsv(data, text, options = {}) {
       skipped.push(`Row ${line} has no customer name.`);
       return;
     }
-    const result = saveLead(current, {
-      date: csvDate(csvValue(row, map, "date", 2)),
-      business,
-      phone: csvValue(row, map, "phone", 1),
-      source: csvValue(row, map, "source", 3),
-      service: csvValue(row, map, "service", 4),
-      status: csvValue(row, map, "status", 5) || "New",
-      email: csvValue(row, map, "email", 6),
-      address: csvValue(row, map, "address", 7),
-      next: csvDate(csvValue(row, map, "next", 8), ""),
-      notes: csvValue(row, map, "notes", 9),
-      businessType: csvValue(row, map, "businessType", 10),
-      executive: options.executive || "",
+    const phone = importedPhone(csvValue(row, map, "phone", 1));
+    const duplicate = (current.leads || []).some((lead) => {
+      const sameName = String(lead.business || "").trim().toLowerCase() === business.toLowerCase();
+      const samePhone = phoneDigits(phone).length === 10 && phoneDigits(lead.phone) === phoneDigits(phone);
+      return sameName || samePhone;
     });
+    if (duplicate || (phoneDigits(phone).length === 10 && leadPhoneTaken(phone))) {
+      skipped.push(`Row ${line} (${business}) matches an existing lead.`);
+      return;
+    }
+    const notes = [csvValue(row, map, "notes", 9), importedExtras(headers, row, map)].filter((item) => String(item || "").trim()).join("\n");
+    const businessType = String(csvValue(row, map, "businessType", 10) || "").trim();
+    let result;
+    try {
+      result = saveLead(current, {
+        imported: true,
+        unsaved: true,
+        date: csvDate(csvValue(row, map, "date", 2)),
+        business,
+        phone,
+        source: importedSource(csvValue(row, map, "source", 3)),
+        service: importedService(csvValue(row, map, "service", 4)),
+        status: csvValue(row, map, "status", 5) || "New",
+        email: csvValue(row, map, "email", 6),
+        address: csvValue(row, map, "address", 7),
+        next: csvDate(csvValue(row, map, "next", 8), ""),
+        notes,
+        businessType: businessType.toLowerCase() === "other" ? "Other" : businessType,
+        executive: options.executive || "",
+      });
+    } catch (error) {
+      skipped.push(`Row ${line} (${business}): ${error?.message || "could not be imported."}`);
+      return;
+    }
     if (!result.ok) {
-      skipped.push(`Row ${line}: ${result.error}`);
+      skipped.push(`Row ${line} (${business}): ${result.error}`);
+      return;
+    }
+    const known = new Set((current.leads || []).map((lead) => lead.id));
+    const added = (result.data.leads || []).filter((lead) => lead?.id && !known.has(lead.id));
+    if (added.length !== 1) {
+      added.forEach((lead) => forgetLeadPhone(lead.id));
+      skipped.push(`Row ${line} (${business}): could not assign a new lead ID.`);
       return;
     }
     current = result.data;
     imported += 1;
   });
-  if (!imported) return { ok: false, error: skipped[0] || "No leads were imported." };
-  const skipNote = skipped.length ? ` Skipped ${skipped.length}: ${skipped.slice(0, 3).join(" ")}` : "";
+  if (!imported) return { ok: false, error: skipped.join(" ") || "No leads were imported." };
+  const skipNote = skipped.length ? ` Skipped ${skipped.length}: ${skipped.join(" ")}` : "";
   return {
     ok: true,
     data: current,
@@ -1827,15 +2032,21 @@ export function saveLead(data, draft) {
   const business = String(draft.business || draft.name || "").trim();
   if (!business) return { ok: false, error: "Business / customer name is required." };
   if (!draft.date) return { ok: false, error: "Lead date is required." };
-  const existing = (data.leads || []).find((item) => item.id && item.id === draft.id);
-  const status = mapLeadStatus(draft.status || existing?.status || "New");
+  const existing = draft.unsaved
+    ? null
+    : (data.leads || []).find((item) => item.id && item.id === draft.id);
+  if (!draft.imported && !dateIsAllowed(draft.date, existing?.date || "")) {
+    return { ok: false, error: "Lead date cannot be before today." };
+  }
+  const status = existing || draft.imported
+    ? mapLeadStatus(draft.status || existing?.status || "New")
+    : "New";
   const phone = formatPhone(draft.phone);
   const digits = phoneDigits(phone);
   if (phoneError(phone)) return { ok: false, error: PHONE_ERROR };
   const samePhone = existing && phoneDigits(existing.phone) === digits;
-  if (digits.length === 10 && !samePhone && leadPhoneTaken(phone, existing?.id || "")) {
-    return { ok: false, error: LEAD_PHONE_EXISTS_MESSAGE };
-  }
+  const phoneConflict = digits.length === 10 && !samePhone ? leadPhoneConflictMessage(phone, existing?.id || "") : "";
+  if (phoneConflict) return { ok: false, error: phoneConflict };
   const email = String(draft.email || "").trim();
   const address = String(draft.address || "").trim();
   if (status === "Converted") {
@@ -1845,16 +2056,32 @@ export function saveLead(data, draft) {
     if (emailError(email, { required: true })) return { ok: false, error: EMAIL_ERROR };
   }
   if (emailError(email)) return { ok: false, error: EMAIL_ERROR };
-  const id = existing ? existing.id : claimLeadId(draft.id);
-  if (!id) return { ok: false, error: "Lead ID is required." };
   let calls = Array.isArray(existing?.calls) ? existing.calls.map(normalizeCall).filter(Boolean) : [];
+  const unanswered = draft.call?.outcome === "Not Answered";
+  if (draft.call?.next && !dateIsAllowed(draft.call.next)) {
+    return { ok: false, error: "Next follow-up date cannot be before today." };
+  }
+  let id = existing ? existing.id : "";
+  if (!id) {
+    let number = Math.max(0, harvestLeadIndex().sequence);
+    (data.leads || []).forEach((lead) => {
+      number = Math.max(number, leadIdNumber(lead?.id));
+    });
+    do {
+      number += 1;
+      id = formatLeadId(number);
+    } while ((data.leads || []).some((lead) => lead.id === id));
+  }
+  if (!id) return { ok: false, error: "Lead ID is required." };
   if (draft.call) {
+    const previousCall = Number.isInteger(draft.callIndex) ? (existing?.calls || [])[draft.callIndex] : null;
     const rec = normalizeCall({
       date: draft.call.date || todayISO(),
       outcome: draft.call.outcome,
-      status: draft.call.status || status,
+      status: unanswered ? (existing?.status || status) : (draft.call.status || status),
       next: draft.call.next,
       note: draft.call.note,
+      createdAt: previousCall?.createdAt || new Date().toISOString(),
     });
     if (rec) {
       if (Number.isInteger(draft.callIndex) && draft.callIndex >= 0 && draft.callIndex < calls.length) {
@@ -1865,7 +2092,7 @@ export function saveLead(data, draft) {
     }
   }
   const lastCall = calls[calls.length - 1];
-  const nextStatus = draft.call?.status || status;
+  const nextStatus = draft.call ? (unanswered ? (existing?.status || status) : (draft.call.status || status)) : status;
   const next = normalizeLead({
     id,
     date: draft.date,
@@ -1880,26 +2107,41 @@ export function saveLead(data, draft) {
     next: draft.call?.next ?? draft.next ?? existing?.next ?? "",
     notes: String(draft.notes || "").trim(),
     executive: String(draft.executive || existing?.executive || ""),
-    clientCode: existing?.clientCode || (nextStatus === "Converted" ? nextSalesClientCode(data) : ""),
+    clientCode: nextStatus === "Converted" ? (existing?.clientCode || "") : "",
+    createdAt: existing?.createdAt || new Date().toISOString(),
     calls,
   });
   if (lastCall && draft.call) {
     next.status = lastCall.status || next.status;
     next.next = lastCall.next || next.next;
   }
-  if (next.status === "Converted" && !next.clientCode) next.clientCode = nextSalesClientCode(data);
+  if (next.status === "Converted") {
+    if (!next.clientCode) next.clientCode = nextSalesClientCode(data);
+  } else {
+    next.clientCode = "";
+  }
   if (next.clientCode) noteClientCode(next.clientCode);
   const phoneAccepted = rememberLeadPhone(next.id, next.phone);
   if (digits.length === 10 && !samePhone && !phoneAccepted) {
-    return { ok: false, error: LEAD_PHONE_EXISTS_MESSAGE };
+    return { ok: false, error: leadPhoneConflictMessage(phone, next.id) || LEAD_PHONE_EXISTS_MESSAGE };
   }
   const currentLeads = Array.isArray(data.leads) ? data.leads : [];
+  let replacedLead = false;
   const leads = existing
-    ? currentLeads.map((item) => (item.id === existing.id ? next : item))
+    ? currentLeads.map((item) => {
+      if (replacedLead || item.id !== existing.id) return item;
+      replacedLead = true;
+      return next;
+    })
     : [...currentLeads, next];
   const followUp = followUpFromLead(next);
+  let replacedFollowUp = false;
   const followUps = (data.followUps || []).some((item) => item.id === next.id)
-    ? data.followUps.map((item) => (item.id === next.id ? followUp : item))
+    ? data.followUps.map((item) => {
+      if (replacedFollowUp || item.id !== next.id) return item;
+      replacedFollowUp = true;
+      return followUp;
+    })
     : next.status === "Converted" || next.status === "Lost" || next.next
       ? [...(data.followUps || []), followUp]
       : (data.followUps || []);
@@ -2070,6 +2312,53 @@ export function quotesForProjects(projects) {
   });
 }
 
+export function serviceTypeFromInterest(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return "";
+  if (text.includes("both")) return "both";
+  const marketing = text.includes("marketing");
+  const software = text.includes("software");
+  if (marketing && software) return "both";
+  if (marketing) return "marketing";
+  if (software) return "software";
+  return "";
+}
+
+export function sharedLeadRows() {
+  try {
+    const raw = JSON.parse(crmStorage.getItem(LEAD_INDEX_KEY) || "null");
+    return Array.isArray(raw?.leads) ? raw.leads : [];
+  } catch {
+    return [];
+  }
+}
+
+export function interestedServiceType(name) {
+  const key = String(name || "").trim().toLowerCase();
+  if (!key) return "";
+  let found = "";
+  function consider(service) {
+    const type = serviceTypeFromInterest(service);
+    if (type === "both") found = "both";
+    else if (type && found !== "both") found = type;
+  }
+  sharedLeadRows().forEach((lead) => {
+    const business = String(lead?.business || lead?.name || "").trim().toLowerCase();
+    if (business === key) consider(lead.service);
+  });
+  if (found !== "both") {
+    eachSalesAccount((raw) => {
+      (raw?.leads || []).forEach((lead) => {
+        const business = String(lead?.business || lead?.name || "").trim().toLowerCase();
+        if (business === key) consider(lead.service);
+      });
+    });
+  }
+  if (found) return found;
+  const quote = quoteForClientRecord({ name });
+  return quote ? projectTypeFromQuote(quote) : "";
+}
+
 export function quotesByServiceType(types) {
   const allowed = Array.isArray(types) && types.length ? new Set(types) : null;
   return quoteRowsFor((quote) => !allowed || allowed.has(projectTypeFromQuote(quote)));
@@ -2231,6 +2520,33 @@ export function saveCompanyLead(draft) {
     );
   }
   return { ok: true };
+}
+
+export function deleteCompanyLeads(rows) {
+  const session = sessionAccount();
+  if (session?.role !== "ceo") return { ok: false, error: "Only the CEO can delete these leads." };
+  const notes = [];
+  const grouped = new Map();
+  (rows || []).forEach((row) => {
+    const owner = row?.owner || findLeadStore(row?.id) || UNASSIGNED_OWNER;
+    const ids = grouped.get(owner) || [];
+    ids.push(row.id);
+    grouped.set(owner, ids);
+  });
+  grouped.forEach((ids, owner) => {
+    let data = loadSalesAccountData(owner);
+    let changed = false;
+    ids.forEach((id) => {
+      const result = deleteLead(data, id);
+      if (!result.ok) notes.push(`${id}: ${result.error}`);
+      else {
+        data = result.data;
+        changed = true;
+      }
+    });
+    if (changed) persistSalesAccount(owner, data);
+  });
+  return { ok: notes.length === 0, error: notes.join(" ") };
 }
 
 function paymentSaleStatus(payment) {
@@ -2600,38 +2916,47 @@ export function quotationDocument(quote, heading = "QUOTATION") {
   const lines = quote.items?.length
     ? quote.items
     : [{ packageName: quote.packageName, price: quote.price, scope: quote.scope }];
-  const rows = lines.map((line, index) => `<tr><td><strong>${index + 1}. ${escapeHtml(line.packageName)}</strong><div class="scope">${formatScopeHtml(line.scope)}</div></td><td>${escapeHtml(formatQuoteAmount(line.price))}</td></tr>`).join("");
-  const percent = formatDiscountPercent(figures.percent);
-  return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(quote.number || heading)}</title><style>
-    body{margin:0;background:#f3f1f6;color:#1c1a24;font:15px/1.45 "Segoe UI",Arial,sans-serif}
-    .sheet{max-width:820px;margin:28px auto;background:#fff;border-radius:28px;padding:42px 48px 28px;box-shadow:0 12px 40px rgba(22,18,43,.08)}
-    .head{display:flex;justify-content:space-between;gap:24px;align-items:flex-start}
-    .brand{display:flex;align-items:center}
-    .brand .logo{height:52px;width:auto;display:block}
-    .party{margin:18px 0 0;color:#3a3648;white-space:pre-wrap}
-    .party strong{display:block;color:#1c1a24}
-    .id{text-align:right}
-    .id strong{display:block;letter-spacing:.14em;font-size:18px}
-    .id span{display:block;margin-top:6px;color:#3a3648}
-    hr{border:0;border-top:1.5px solid #1c1a24;margin:22px 0}
-    table{width:100%;border-collapse:separate;border-spacing:0;border:1px solid #e4e0ea;border-radius:12px;overflow:hidden}
-    th,td{padding:16px 18px;vertical-align:top;text-align:left}
-    th{font-size:12px;letter-spacing:.08em;text-transform:uppercase}
-    td p,td .scope{margin:6px 0 0;color:#5c566c} td .scope p,td .scope div{margin:0 0 6px} td .scope :last-child{margin-bottom:0}
-    td:last-child,th:last-child{text-align:right;width:180px;font-variant-numeric:tabular-nums}
-    tbody tr+tr td{border-top:1px solid #ece8f2}
-    .totals{width:min(360px,100%);margin-left:auto;display:grid;gap:10px;padding:22px 4px 8px}
-    .totals p{display:flex;justify-content:space-between;gap:18px;margin:0}
-    .totals .discount{color:#1aa36a}
-    .totals .grand{border-top:1px solid #e4e0ea;padding-top:12px;font-weight:700}
-    .totals .grand span{max-width:140px}
-    h3{margin:0 0 8px;font-size:16px}
-    .terms p{margin:0;color:#3a3648;white-space:pre-wrap}
-    footer{color:#6d687c;font-size:13px}
-    button{margin:0 0 16px;padding:10px 14px;border:0;border-radius:8px;background:#873CFF;color:#fff;font-weight:700}
-    @page{size:A4;margin:14mm}
-    @media print{body{background:#fff}button{display:none}.sheet{margin:0;box-shadow:none;border-radius:0;max-width:none}}
-  </style><body><button onclick="window.print()">Print / Save as PDF</button><article class="sheet"><header class="head"><div><div class="brand"><img class="logo" src="${neonLogo}" alt="NeonLabz" /></div><p class="party"><strong>${escapeHtml(quote.client)}</strong>${escapeHtml(quote.address || "")}</p></div><div class="id"><strong>${escapeHtml(heading)}</strong><span>#${escapeHtml(quote.number || "")}</span><span>${escapeHtml(formatQuoteDate(quote.date))}</span></div></header><hr><table><thead><tr><th>Description</th><th>Total (LKR)</th></tr></thead><tbody>${rows}</tbody></table><div class="totals"><p><span>Subtotal</span><strong>LKR ${escapeHtml(formatQuoteAmount(figures.subtotal))}</strong></p><p class="discount"><span>Special Discount (${percent}%)</span><strong>-LKR ${escapeHtml(formatQuoteAmount(figures.discount))}</strong></p><p><span>VAT (8%)</span><strong>LKR ${escapeHtml(formatQuoteAmount(figures.vat))}</strong></p><p class="grand"><span>Estimated Grand Total</span><strong>LKR ${escapeHtml(formatQuoteAmount(figures.grand))}</strong></p></div><hr><section class="terms"><h3>Terms &amp; Conditions</h3><p>${escapeHtml(quote.terms || "")}</p></section><hr><footer>Neonlabz (Pvt) Ltd.</footer></article></body></html>`;
+  const rows = lines.map((line, index) => `<tr><td><strong>${index + 1}. ${escapeHtml(line.packageName)}</strong><div class="scope">${formatScopeHtml(line.scope)}</div></td><td class="money">${escapeHtml(formatQuoteAmount(line.price))}</td></tr>`).join("");
+  const percent = formatDiscountPercent(discountPercentOf(quote) || figures.percent);
+  return wrapLetterhead({
+    title: quote.number || heading,
+    cover: {
+      title: heading,
+      preparedFor: quote.client || "Client",
+      period: quote.number ? `#${quote.number}` : "",
+      department: "Sales",
+      source: "Quotation",
+      date: quote.date,
+      preparedBy: "Neon Labz",
+    },
+    extraCss: `
+      .money { text-align:right; white-space:nowrap; width:140px; }
+      .scope { margin-top:6px; color:#69708A; }
+      .scope p, .scope div { margin:0 0 6px; }
+      .totals { width:280px; margin-left:auto; }
+      .totals p { display:flex; justify-content:space-between; gap:12px; }
+      .totals .discount { color:#1aa36a; }
+      .totals .grand { border-top:2px solid #873CFF; padding-top:8px; font-weight:700; }
+      .terms { white-space:pre-wrap; }
+    `,
+    body: `
+      <p class="kicker">${escapeHtml(heading)}</p>
+      <h1>${escapeHtml(quote.client || "Client")}</h1>
+      <p class="meta">${escapeHtml([quote.number ? `#${quote.number}` : "", formatQuoteDate(quote.date), quote.address].filter(Boolean).join(" · "))}</p>
+      <table>
+        <thead><tr><th>Description</th><th class="money">Total (LKR)</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div class="totals">
+        <p><span>Subtotal</span><strong>LKR ${escapeHtml(formatQuoteAmount(figures.subtotal))}</strong></p>
+        <p class="discount"><span>Special Discount (${percent}%)</span><strong>-LKR ${escapeHtml(formatQuoteAmount(figures.discount))}</strong></p>
+        <p><span>VAT (8%)</span><strong>LKR ${escapeHtml(formatQuoteAmount(figures.vat))}</strong></p>
+        <p class="grand"><span>Estimated Grand Total</span><strong>LKR ${escapeHtml(formatQuoteAmount(figures.grand))}</strong></p>
+      </div>
+      <h2>Terms and conditions</h2>
+      <p class="terms">${escapeHtml(quote.terms || "")}</p>
+    `,
+  });
 }
 
 export function paymentReceiptDocument(invoice) {

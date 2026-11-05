@@ -15,10 +15,15 @@ import { COMPANY, canReadStore, canWriteStore, isCeo, roleFromUsername } from ".
 import {
   REGISTRY_KEY,
   RegistryError,
+  assignUniqueLeadIds,
+  keepExistingSalesLeads,
   claimRegistryCode,
+  restoreClonedLeads,
   leadPhoneOwner,
   releaseLeadPhone,
   reserveLeadPhone,
+  syncSavedClientCodes,
+  syncSavedLeadIds,
   unionRegistryIds,
 } from "./registryStore.js";
 import {
@@ -119,6 +124,189 @@ function employeeCodeOnProject(project, code) {
   return (project?.milestones || []).some((item) =>
     (item?.assignees || []).some((value) => String(value || "").trim().toUpperCase() === code)
   );
+}
+
+function sharedProjectType(project) {
+  return project?.type === "marketing" || project?.type === "both" ? project.type : "software";
+}
+
+function milestoneLane(milestone) {
+  return milestone?.department === "marketing" || milestone?.department === "software" ? milestone.department : "";
+}
+
+function mergeSharedMilestones(previous, incoming, role) {
+  const prior = Array.isArray(previous) ? previous : [];
+  const next = Array.isArray(incoming) ? incoming : prior;
+  if (role === "marketing") {
+    return [...prior.filter((item) => milestoneLane(item) === "software"), ...next.filter((item) => milestoneLane(item) !== "software")];
+  }
+  if (role === "pm") {
+    return [...prior.filter((item) => milestoneLane(item) === "marketing"), ...next.filter((item) => milestoneLane(item) !== "marketing")];
+  }
+  return next;
+}
+
+function mergeSharedProject(previous, incoming, role) {
+  if (!incoming?.id) return previous || null;
+  if (!previous) {
+    const type = sharedProjectType(incoming);
+    if (role === "marketing" && type === "software") return null;
+    if (role === "pm" && type === "marketing") return null;
+    return incoming;
+  }
+  const shared = ["marketing", "both"].includes(sharedProjectType(previous)) || ["marketing", "both"].includes(sharedProjectType(incoming));
+  if (!shared) return previous;
+  const type = previous.type === "both" || incoming.type === "both" ? "both" : (incoming.type || previous.type);
+  const base = {
+    ...previous,
+    ...incoming,
+    id: previous.id,
+    code: previous.code || incoming.code,
+    type,
+    milestones: mergeSharedMilestones(previous.milestones, incoming.milestones, role),
+  };
+  if (role === "marketing") {
+    return { ...base, assignees: previous.assignees || [] };
+  }
+  return { ...base, marketingAssignees: previous.marketingAssignees || [] };
+}
+
+async function mergeSharedProjectStore(owner, role, incoming) {
+  const existing = await Store.findOne({ key: "neon-crm-projects", owner }).lean();
+  const current = Array.isArray(existing?.data?.projects) ? existing.data.projects : [];
+  const meetings = Array.isArray(existing?.data?.meetings) ? existing.data.meetings : [];
+  const byId = new Map(current.map((project) => [project.id, project]));
+  (Array.isArray(incoming?.projects) ? incoming.projects : []).forEach((project) => {
+    const previous = byId.get(project?.id);
+    const next = mergeSharedProject(previous, project, role);
+    if (next?.id) byId.set(next.id, next);
+  });
+  await Store.findOneAndUpdate(
+    { key: "neon-crm-projects", owner },
+    { key: "neon-crm-projects", owner, data: { ...(existing?.data || {}), projects: [...byId.values()], meetings } },
+    { upsert: true, setDefaultsOnInsert: true }
+  );
+}
+
+function sharedDeliveryStores(stores, user) {
+  if (user.role !== "pm" && user.role !== "marketing") return [];
+  const extra = [];
+  for (const item of stores) {
+    if (item.owner === user.username) continue;
+    if (item.key === "neon-crm-projects") {
+      const projects = (Array.isArray(item.data?.projects) ? item.data.projects : [])
+        .filter((project) => sharedProjectType(project) !== "software");
+      if (projects.length) extra.push({ key: item.key, owner: item.owner, data: { projects, meetings: [] } });
+    }
+    if (item.key === "neon-crm-marketing") {
+      const clients = Array.isArray(item.data?.clients) ? item.data.clients : [];
+      const plans = Array.isArray(item.data?.plans) ? item.data.plans : [];
+      const reports = Array.isArray(item.data?.reports) ? item.data.reports : [];
+      if (!clients.length && !plans.length && !reports.length) continue;
+      extra.push({ key: item.key, owner: item.owner, data: item.data });
+    }
+  }
+  return extra;
+}
+
+function leadRowsFromSales(stores) {
+  const rows = [];
+  for (const item of stores) {
+    if (item.key !== "neon-crm-sales" || !Array.isArray(item.data?.leads)) continue;
+    for (const lead of item.data.leads) {
+      if (!lead?.id) continue;
+      rows.push({
+        id: lead.id,
+        business: lead.business || lead.name || "",
+        name: lead.business || lead.name || "",
+        address: lead.address || "",
+        phone: lead.phone || "",
+        email: lead.email || "",
+        service: lead.service || "",
+        status: lead.status || "",
+        owner: item.owner,
+        date: lead.date || "",
+      });
+    }
+  }
+  return rows;
+}
+
+function startedPayers(stores) {
+  const byName = new Map();
+  for (const item of stores) {
+    if (item.key !== "neon-crm-sales") continue;
+    const leads = Array.isArray(item.data?.leads) ? item.data.leads : [];
+    const quotes = Array.isArray(item.data?.quotes) ? item.data.quotes : [];
+    const payments = Array.isArray(item.data?.payments) ? item.data.payments : [];
+    payments.forEach((payment) => {
+      if (!payment || payment.status === "cancelled") return;
+      const quote = quotes.find((entry) => entry?.id === payment.quoteId);
+      const name = String(payment.clientName || quote?.client || "").trim();
+      if (!name) return;
+      const key = name.toLowerCase();
+      const lead = leads.find((entry) => entry?.id === payment.clientId || entry?.id === quote?.clientId)
+        || leads.find((entry) => String(entry?.business || "").trim().toLowerCase() === key);
+      const current = byName.get(key) || { name };
+      byName.set(key, {
+        name,
+        code: current.code || lead?.clientCode || quote?.clientCode || payment.clientCode || "",
+        email: current.email || lead?.email || quote?.email || "",
+        phone: current.phone || lead?.phone || quote?.phone || "",
+        address: current.address || lead?.address || quote?.address || "",
+        service: current.service || lead?.service || "",
+      });
+    });
+  }
+  return [...byName.values()];
+}
+
+function withStartedPayers(visible, stores, role) {
+  if (role !== "pm" && role !== "marketing") return visible;
+  const payers = startedPayers(stores);
+  let found = false;
+  const next = visible.map((item) => {
+    if (item.key !== "neon-crm-paying-clients") return item;
+    found = true;
+    const existing = Array.isArray(item.data) ? item.data : [];
+    const byName = new Map();
+    existing.forEach((row) => {
+      const name = String(row?.name || "").trim();
+      if (name) byName.set(name.toLowerCase(), row);
+    });
+    payers.forEach((row) => {
+      const key = row.name.toLowerCase();
+      byName.set(key, { ...(byName.get(key) || {}), ...row, name: row.name });
+    });
+    return { ...item, data: [...byName.values()] };
+  });
+  if (!found) next.push({ key: "neon-crm-paying-clients", owner: "company", data: payers });
+  return next;
+}
+
+function withServiceLeads(visible, stores, role) {
+  if (role !== "pm" && role !== "marketing") return visible;
+  const leads = leadRowsFromSales(stores);
+  if (!leads.length) return visible;
+  let found = false;
+  const next = visible.map((item) => {
+    if (item.key !== "neon-crm-lead-index") return item;
+    found = true;
+    const data = item.data && typeof item.data === "object" ? { ...item.data, ids: { ...(item.data.ids || {}) } } : { sequence: 0, ids: {} };
+    const byId = new Map();
+    (Array.isArray(data.leads) ? data.leads : []).forEach((lead) => {
+      if (lead?.id) byId.set(lead.id, { ...lead });
+    });
+    leads.forEach((lead) => {
+      const current = byId.get(lead.id) || {};
+      byId.set(lead.id, { ...current, ...lead, service: lead.service || current.service || "" });
+    });
+    return { ...item, data: { ...data, leads: [...byId.values()] } };
+  });
+  if (!found) {
+    next.push({ key: "neon-crm-lead-index", owner: "company", data: { sequence: 0, ids: {}, leads } });
+  }
+  return next;
 }
 
 function employeeAssignedStores(stores, username) {
@@ -265,10 +453,11 @@ export function createApp() {
       .filter((item) => canReadStore(req.user, item.key, item.owner))
       .map((item) => ({ key: item.key, owner: item.owner, data: item.data }));
     const assigned = req.user.role === "employee" ? employeeAssignedStores(stores, req.user.username) : [];
+    const shared = sharedDeliveryStores(stores, req.user);
     res.json({
       user: publicUser(user),
       users: users.map((item) => publicUser(item)),
-      stores: [...visible, ...assigned],
+      stores: [...withStartedPayers(withServiceLeads(visible, stores, req.user.role), stores, req.user.role), ...assigned, ...shared],
     });
   });
 
@@ -673,7 +862,12 @@ export function createApp() {
         && owner !== req.user.username
         && owner !== COMPANY
         && !item.deleted;
-      if (!canWriteStore(req.user, key, owner) && !ownTasks) {
+      const sharedProjects = (req.user.role === "pm" || req.user.role === "marketing")
+        && key === "neon-crm-projects"
+        && owner !== req.user.username
+        && owner !== COMPANY
+        && !item.deleted;
+      if (!canWriteStore(req.user, key, owner) && !ownTasks && !sharedProjects) {
         rejected.push({ key, owner });
         continue;
       }
@@ -683,6 +877,7 @@ export function createApp() {
         deleted: Boolean(item.deleted),
         data: item.deleted ? undefined : item.data ?? null,
         mergeEmployeeTasks: ownTasks,
+        mergeSharedProjects: sharedProjects,
       });
     }
     if (rejected.length) {
@@ -699,7 +894,12 @@ export function createApp() {
         await mergeEmployeeTasks(item.owner, req.user.username, item.data);
         continue;
       }
+      if (item.mergeSharedProjects) {
+        await mergeSharedProjectStore(item.owner, req.user.role, item.data);
+        continue;
+      }
       if (item.deleted) {
+        if (req.user.role === "sales" && item.key === "neon-crm-sales") continue;
         await Store.deleteOne({ key: item.key, owner: item.owner });
         continue;
       }
@@ -707,11 +907,49 @@ export function createApp() {
         await unionRegistryIds(item.data);
         continue;
       }
+      let data = item.data;
+      if (item.key === "neon-crm-sales" && data && typeof data === "object") {
+        const existing = await Store.findOne({ key: item.key, owner: item.owner }).lean();
+        const current = existing?.data && typeof existing.data === "object" ? existing.data : {};
+        const others = await Store.find({ key: "neon-crm-sales", owner: { $ne: item.owner } }).select("data.leads.id").lean();
+        const otherLeadIds = [];
+        const floor = others.reduce((max, doc) => {
+          (doc.data?.leads || []).forEach((lead) => {
+            const number = Number(String(lead?.id || "").replace(/\D/g, ""));
+            if (lead?.id) otherLeadIds.push(lead.id);
+            if (number > max) max = number;
+          });
+          return max;
+        }, 0);
+        data = restoreClonedLeads(data, current);
+        data = assignUniqueLeadIds(data, floor, current.leads || []);
+        if (req.user.role === "sales" && item.owner === req.user.username) {
+          data = keepExistingSalesLeads(data, current);
+        }
+        if (Array.isArray(data.leads)) {
+          data = {
+            ...data,
+            leads: data.leads.map((lead) => (lead?.status === "Converted" ? lead : { ...lead, clientCode: "" })),
+          };
+        }
+        await syncSavedLeadIds(data.leads, otherLeadIds);
+        if (req.user.role === "sales" && item.owner === req.user.username) {
+          data = {
+            ...data,
+            team: current.team && typeof current.team === "object" ? current.team : data.team,
+            goals: current.goals && typeof current.goals === "object" ? current.goals : data.goals,
+            rates: current.rates && typeof current.rates === "object" ? current.rates : data.rates,
+          };
+        }
+      }
       await Store.findOneAndUpdate(
         { key: item.key, owner: item.owner },
-        { key: item.key, owner: item.owner, data: item.data },
+        { key: item.key, owner: item.owner, data },
         { upsert: true, setDefaultsOnInsert: true }
       );
+    }
+    if (accepted.some((item) => item.key === "neon-crm-sales" || item.key === "neon-crm-clients" || item.key === REGISTRY_KEY)) {
+      await syncSavedClientCodes();
     }
     if (accepted.length) {
       await writeAudit(req.user.username, "stores.saved", {

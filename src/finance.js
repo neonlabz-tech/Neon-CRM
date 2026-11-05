@@ -412,6 +412,17 @@ export function dismissNotice(id) {
   }
 }
 
+export function dismissNoticesFor(username) {
+  try {
+    const raw = JSON.parse(crmStorage.getItem(NOTICES_KEY) || "[]");
+    const next = Array.isArray(raw) ? raw.filter((item) => item.to !== username) : [];
+    crmStorage.setItem(NOTICES_KEY, JSON.stringify(next));
+    pingNotices();
+  } catch {
+    // Ignore a full browser store. The notices can be cleared on the next visit.
+  }
+}
+
 export function notifyUser(username, text) {
   addNotice(username, text, "");
 }

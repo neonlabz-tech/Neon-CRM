@@ -197,7 +197,7 @@ export function renderBrandDocument({
   @media print {
     html, body { background: #fff !important; }
     button.print { display: none !important; }
-    .sheet { margin: 0 !important; box-shadow: none !important; width: 210mm; }
+    .sheet { margin: 0 !important; box-shadow: none !important; width: 210mm; min-height: 0 !important; }
   }
 </style></head>
 <body>

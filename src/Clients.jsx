@@ -2,7 +2,7 @@ import { useState } from "react";
 import { createPortal } from "react-dom";
 import { blankClient, blankSubContact, INDUSTRIES, nextClientCode, saveClients, TIERS } from "./clients.js";
 import { publishClients, pushPmToMarketing } from "./clientSync.js";
-import { clientsWithPaying, salesClientByName, salesClientDirectory } from "./sales.js";
+import { clientsWithPaying, interestedServiceType, salesClientByName, salesClientDirectory, startedPaymentClients } from "./sales.js";
 import { EMAIL_ERROR, PHONE_ERROR, emailError, formatPhone, phoneError } from "./hrms.js";
 import { dataOwner } from "./scope.js";
 
@@ -13,9 +13,18 @@ function companyClient(client) {
   return salesClientDirectory().some((item) => item.name.trim().toLowerCase() === name);
 }
 
+function startedNames() {
+  return new Set(startedPaymentClients().map((item) => item.name.toLowerCase()));
+}
+
+function companyClients(clients) {
+  const started = startedNames();
+  return clients.filter((client) => started.has(String(client.name || "").trim().toLowerCase()) && interestedServiceType(client.name) !== "marketing");
+}
+
 function readClientPage(personal) {
   const published = publishClients();
-  const listed = personal ? published.clients.filter((client) => !companyClient(client)) : clientsWithPaying(published.clients, dataOwner());
+  const listed = personal ? published.clients.filter((client) => !companyClient(client)) : companyClients(clientsWithPaying(published.clients, dataOwner()));
   return { ...published, clients: listed };
 }
 
@@ -28,7 +37,7 @@ export function ClientsWorkspace({ personal = false } = {}) {
   function commit(nextClients) {
     saveClients(nextClients);
     const published = publishClients();
-    const listed = personal ? published.clients.filter((client) => !companyClient(client)) : clientsWithPaying(published.clients, dataOwner());
+    const listed = personal ? published.clients.filter((client) => !companyClient(client)) : companyClients(clientsWithPaying(published.clients, dataOwner()));
     setPage({ ...published, clients: listed });
   }
 
@@ -80,11 +89,11 @@ export function ClientsWorkspace({ personal = false } = {}) {
       <div className="toolbar">
         <p>{personal
           ? "Clients for your own projects. Add the company, the main person, and contact details."
-          : "Clients with a CEO-approved payment are listed here. Add the main person, assigned person, and contact details."}</p>
+          : "Clients who have started a payment are listed here. Add the main person, assigned person, and contact details."}</p>
         <button className="primary" type="button" onClick={() => setEditing(blankClient())}>Add client</button>
       </div>
       <article className="panel">
-        {clients.length === 0 ? <p className="empty-copy">{personal ? "No clients yet. Add a client for your own projects." : "No approved clients yet. When the CEO approves a payment, that client is listed here."}</p> : (
+        {clients.length === 0 ? <p className="empty-copy">{personal ? "No clients yet. Add a client for your own projects." : "No clients have started a payment yet."}</p> : (
           <table>
             <thead>
               <tr>

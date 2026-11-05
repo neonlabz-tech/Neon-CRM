@@ -1,5 +1,5 @@
 import { loadUsers } from "./crm.js";
-import { loadIncomingProjects, projectTypeFromQuote, quoteForClientRecord, salesClientByName } from "./sales.js";
+import { dateIsAllowed, interestedServiceType, loadIncomingProjects, projectTypeFromQuote, quoteForClientRecord, salesClientByName } from "./sales.js";
 import { claimProjectCode, noteProjectCode, projectIdTaken, suggestProjectCode } from "./registry.js";
 import { readAccount, readScoped, sessionAccount, writeScoped } from "./scope.js";
 import { crmStorage } from "./storage.js";
@@ -29,6 +29,47 @@ export function loadProjects() {
 export function saveProjects(data) {
   (data?.projects || []).forEach((project) => noteProjectCode(project?.code));
   writeScoped(STORAGE_KEY, data);
+}
+
+function milestoneLane(milestone) {
+  return milestone?.department === "marketing" || milestone?.department === "software" ? milestone.department : "";
+}
+
+function mergeSharedMilestones(previous, incoming, role) {
+  const prior = Array.isArray(previous) ? previous : [];
+  const next = Array.isArray(incoming) ? incoming : prior;
+  if (role === "marketing") {
+    return [...prior.filter((item) => milestoneLane(item) === "software"), ...next.filter((item) => milestoneLane(item) !== "software")];
+  }
+  if (role === "pm") {
+    return [...prior.filter((item) => milestoneLane(item) === "marketing"), ...next.filter((item) => milestoneLane(item) !== "marketing")];
+  }
+  return next;
+}
+
+export function saveSharedProject(owner, project) {
+  const role = sessionAccount()?.role;
+  if (!owner || !project?.id || (role !== "pm" && role !== "marketing")) return;
+  const fields = { ...project };
+  delete fields.owner;
+  const store = accountProjectStore(owner);
+  const existing = store.raw.projects.find((item) => item.id === fields.id);
+  const type = existing?.type === "both" || fields.type === "both" ? "both" : projectTypeOf(fields.type ? fields : existing);
+  const next = {
+    ...(existing || blankProject()),
+    ...fields,
+    id: existing?.id || fields.id,
+    code: existing?.code || fields.code || "",
+    type,
+    assignees: role === "marketing" ? normalizeAssignees(existing?.assignees) : normalizeAssignees(fields.assignees || existing?.assignees),
+    marketingAssignees: role === "pm" ? normalizeAssignees(existing?.marketingAssignees) : normalizeAssignees(fields.marketingAssignees || existing?.marketingAssignees),
+    milestones: mergeSharedMilestones(existing?.milestones, fields.milestones, role),
+  };
+  noteProjectCode(next.code);
+  const projects = existing
+    ? store.raw.projects.map((item) => (item.id === next.id ? next : item))
+    : [next, ...store.raw.projects];
+  crmStorage.setItem(`${STORAGE_KEY}:${owner}`, JSON.stringify({ ...store.raw, projects, meetings: store.raw.meetings || [] }));
 }
 
 export function companyProjects() {
@@ -121,6 +162,46 @@ export function allProjectRecords() {
     });
   });
   return rows;
+}
+
+function projectsForClientName(name) {
+  const key = String(name || "").trim().toLowerCase();
+  if (!key) return [];
+  return allProjectRecords()
+    .filter((project) => !project.archived && String(project.client || "").trim().toLowerCase() === key)
+    .sort((a, b) => projectCodeNumber(a.code) - projectCodeNumber(b.code) || String(a.code || "").localeCompare(String(b.code || "")));
+}
+
+export function linkedProjectForClient(name) {
+  const interest = interestedServiceType(name);
+  const matches = projectsForClientName(name);
+  if (!matches.length) return null;
+  const both = matches.find((project) => project.type === "both");
+  if (both) return both;
+  if (interest === "both") return matches[0];
+  return null;
+}
+
+export function clientProject(name, { own = false, username = "" } = {}) {
+  const matches = projectsForClientName(name);
+  if (!matches.length) return null;
+  if (own) return matches.find((project) => project.owner === username) || null;
+  return linkedProjectForClient(name) || matches.find((project) => project.owner === username) || null;
+}
+
+export function projectsForManager(localProjects, username) {
+  const own = (localProjects || []).map((project) => ({ ...project, owner: project.owner || username }));
+  const seen = new Set(own.map((project) => project.id));
+  const codes = new Set(own.map((project) => canonicalProjectCode(project.code)).filter(Boolean));
+  const extra = allProjectRecords().filter((project) => {
+    if (!project?.id || project.archived || project.owner === username) return false;
+    if (project.type !== "both") return false;
+    if (seen.has(project.id)) return false;
+    const code = canonicalProjectCode(project.code);
+    if (code && codes.has(code)) return false;
+    return true;
+  });
+  return [...own, ...extra];
 }
 
 export function companyProjectCodes(exceptMarketingId = "") {
@@ -319,13 +400,15 @@ function findMarketingProjectForDoc(doc) {
 function fieldsFromMarketingDoc(doc) {
   const brand = String(doc?.brandName || "").trim();
   const quote = quoteForClientRecord({ name: brand, code: doc?.clientCode || "" });
-  const quotedType = quote ? projectTypeFromQuote(quote) : "marketing";
+  const quotedType = quote ? projectTypeFromQuote(quote) : "";
+  const interest = interestedServiceType(brand);
+  const type = interest === "both" || quotedType === "both" ? "both" : "marketing";
   return {
     code: canonicalProjectCode(doc?.projectId) || String(doc?.projectId || "").trim(),
     name: brand,
     client: brand,
     clientId: doc?.pmClientId || "",
-    type: quotedType === "both" ? "both" : "marketing",
+    type,
     email: doc?.email || "",
     phone: doc?.phone || "",
     address: doc?.address || "",
@@ -441,6 +524,8 @@ export function saveMarketingProjectDates(owner, projectId, { startDate = "", du
   const found = marketingProjectRecord(owner, projectId);
   if (!found.ok) return found;
   if (!dueDate) return { ok: false, error: "Due date is required." };
+  if (startDate && !dateIsAllowed(startDate, found.project.startDate || "")) return { ok: false, error: "Start date cannot be before today." };
+  if (!dateIsAllowed(dueDate, found.project.dueDate || "")) return { ok: false, error: "Due date cannot be before today." };
   if (startDate && dueDate < startDate) return { ok: false, error: "Due date must be on or after the start date." };
   found.raw.projects = found.raw.projects.map((item) => (
     item.id === projectId ? { ...item, startDate: startDate || item.startDate || "", dueDate } : item
@@ -455,13 +540,15 @@ export function saveMarketingMilestone(owner, projectId, draft) {
   const title = String(draft?.title || "").trim();
   if (!title) return { ok: false, error: "Milestone name is required." };
   if (!draft?.dueDate) return { ok: false, error: "Due date is required." };
+  const previous = (Array.isArray(found.project.milestones) ? found.project.milestones : []).find((item) => item.id === draft.id);
+  if (draft.startDate && !dateIsAllowed(draft.startDate, previous?.startDate || "")) return { ok: false, error: "Start date cannot be before today." };
+  if (!dateIsAllowed(draft.dueDate, previous?.dueDate || "")) return { ok: false, error: "Due date cannot be before today." };
   if (draft.startDate && draft.dueDate && draft.dueDate < draft.startDate) {
     return { ok: false, error: "Due date must be on or after the start date." };
   }
   const assignees = normalizeAssignees(draft?.assignees);
   if (!assignees.length) return { ok: false, error: "Assign at least one employee to this milestone." };
   const list = Array.isArray(found.project.milestones) ? found.project.milestones : [];
-  const previous = list.find((item) => item.id === draft.id);
   if (previous && milestoneDepartment(previous, found.project) === "software") {
     return { ok: false, error: "The project manager manages technical work on this project." };
   }

@@ -1,14 +1,16 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { verifyPassword } from "./crm.js";
 import { notifyRole, notifyUser } from "./finance.js";
 import { loadClients } from "./clients.js";
 import { teamMembersFor } from "./hrms.js";
+import { dateIsAllowed, minSelectableDate } from "./sales.js";
+import { claimProjectCode } from "./registry.js";
 import { sessionAccount } from "./scope.js";
 import { BackButton } from "./BackButton.jsx";
-import { applyClientQuote, loadIncomingProjects, loadSales, projectTypeFromQuote, quoteForClientRecord, salesClientByName, salesClientDirectory } from "./sales.js";
+import { applyClientQuote, clientsWithPaying, interestedServiceType, loadIncomingProjects, loadSales, projectTypeFromQuote, quoteForClientRecord, salesClientByName, salesClientDirectory, startedPaymentClients } from "./sales.js";
 import { ReportsWorkspace } from "./Reports.jsx";
-import { ProjectPackagesBoard, PromisedPackagePanel } from "./Sales.jsx";
+import { PromisedPackagePanel } from "./Sales.jsx";
 import { publishClients } from "./clientSync.js";
 import {
   blankMeeting,
@@ -17,16 +19,21 @@ import {
   applyMilestoneTeam,
   canEditProjectShell,
   canManageDepartment,
+  canonicalProjectCode,
+  clientProject,
   formatDate,
   formatTime,
   loadProjects,
   meetingStatus,
   milestoneDepartment,
   nextCompanyProjectCode,
+  suggestCompanyProjectCode,
   normalizeAssignees,
   pastMeetings,
   projectCounts,
+  projectsForManager,
   saveProjects,
+  saveSharedProject,
   upcomingDate,
   upcomingMeetings,
   firstMatch,
@@ -64,7 +71,7 @@ const MILESTONE_STATUS = {
   done: "Done",
 };
 
-export function ProjectsWorkspace({ access, username, showListTab = true, showQuotations = true, showSalesFeed, own = false }) {
+export function ProjectsWorkspace({ access, username, showListTab = true, showSalesFeed, own = false }) {
   const canEdit = access === "full";
   const salesFeed = own ? false : (showSalesFeed ?? showListTab);
   const showReports = own || !canEdit;
@@ -84,7 +91,6 @@ export function ProjectsWorkspace({ access, username, showListTab = true, showQu
       {canEdit ? null : <p className="banner">Project records are view only from this account.</p>}
       <div className="subnav">
         {showListTab ? <button type="button" className={tab === "projects" ? "active" : ""} onClick={() => setTab("projects")}>Projects</button> : null}
-        {showQuotations ? <button type="button" className={tab === "quotations" ? "active" : ""} onClick={() => setTab("quotations")}>Quotations</button> : null}
         <button type="button" className={tab === "sprints" ? "active" : ""} onClick={() => setTab("sprints")}>Sprints</button>
         <button type="button" className={tab === "milestones" ? "active" : ""} onClick={() => setTab("milestones")}>Milestones</button>
         {showReports ? (
@@ -93,15 +99,8 @@ export function ProjectsWorkspace({ access, username, showListTab = true, showQu
       </div>
       {tab === "projects" ? <ProjectPage data={data} commit={commit} canEdit={canEdit} username={username} own={own} /> : null}
       {salesFeed && tab === "projects" ? <SalesProjects /> : null}
-      {showQuotations && tab === "quotations" ? (
-        <ProjectPackagesBoard
-          projects={data.projects.filter((project) => !project.archived)}
-          clients={loadClients()}
-          hideAmounts
-        />
-      ) : null}
       {tab === "sprints" ? <SprintPage data={data} commit={commit} canEdit={canEdit} /> : null}
-      {tab === "milestones" ? <MilestonePage data={data} commit={commit} canEdit={canEdit} /> : null}
+      {tab === "milestones" ? <MilestonePage data={data} commit={commit} canEdit={canEdit} username={username} own={own} /> : null}
       {tab === "reports" ? <ReportsWorkspace canEdit={own && canEdit} projects={data.projects} /> : null}
     </div>
   );
@@ -123,9 +122,8 @@ function SalesProjects() {
         <table>
           <thead>
             <tr>
-              <th>Client</th>
+              <th>Phone / Customer</th>
               <th>Email</th>
-              <th>Phone</th>
               <th>Address</th>
               <th>Sales admin</th>
               <th>Follow-up</th>
@@ -135,9 +133,11 @@ function SalesProjects() {
           <tbody>
             {incoming.map((project) => (
               <tr key={project.id}>
-                <td>{project.name}</td>
+                <td>
+                  <strong className="register-phone">{project.phone || "—"}</strong>
+                  <div className="muted">{project.name}</div>
+                </td>
                 <td>{project.email || "—"}</td>
-                <td>{project.phone || "—"}</td>
                 <td>{project.address || "—"}</td>
                 <td>{project.salesOwner}</td>
                 <td>{formatDate(project.date)}</td>
@@ -158,15 +158,50 @@ function ProjectPage({ data, commit, canEdit, username, own = false }) {
   const [viewing, setViewing] = useState(null);
   const [milestones, setMilestones] = useState(null);
   const [archiving, setArchiving] = useState(null);
-  const counts = projectCounts(data.projects);
-  const rows = data.projects.filter((project) => project.archived === archiveOpen);
+  const [stamp, setStamp] = useState(0);
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(1);
+  const [showAll, setShowAll] = useState(false);
+  const tableWrap = useRef(null);
+  const pageHeight = useRef(0);
+  const listed = own ? data.projects : projectsForManager(data.projects, username);
+  const counts = projectCounts(listed);
+  const rows = listed.filter((project) => project.archived === archiveOpen).filter((project) => {
+    const hay = `${project.code} ${project.name} ${project.client}`.toLowerCase();
+    return !query || hay.includes(query.toLowerCase());
+  });
+  const pageSize = showAll ? Math.max(rows.length, 1) : 10;
+  const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+  const currentPage = Math.min(page, pageCount);
+  const pageStart = rows.length === 0 ? 0 : (currentPage - 1) * pageSize;
+  const visibleRows = rows.slice(pageStart, pageStart + pageSize);
+
+  useLayoutEffect(() => {
+    if (showAll || !tableWrap.current) return;
+    const node = tableWrap.current;
+    if (visibleRows.length === 10 || rows.length <= 10) {
+      pageHeight.current = node.offsetHeight;
+      return;
+    }
+    if (!pageHeight.current && visibleRows.length > 0) {
+      const head = node.querySelector("thead")?.offsetHeight || 0;
+      const row = node.querySelector("tbody tr")?.offsetHeight || 0;
+      if (row) pageHeight.current = head + row * 10;
+    }
+  }, [showAll, visibleRows, rows.length]);
+  void stamp;
   const people = teamMembersFor("pm");
   const salesNames = own
     ? new Set(salesClientDirectory().map((item) => item.name.trim().toLowerCase()))
     : null;
-  const clients = loadClients().filter((client) => {
-    if (!own || client.source === "own") return true;
-    return !salesNames.has(String(client.name || "").trim().toLowerCase());
+  const started = new Set(startedPaymentClients().map((item) => item.name.toLowerCase()));
+  const clients = (own ? loadClients() : clientsWithPaying(loadClients(), username)).filter((client) => {
+    if (own) {
+      if (client.source === "own") return true;
+      return !salesNames.has(String(client.name || "").trim().toLowerCase());
+    }
+    const name = String(client.name || "").trim().toLowerCase();
+    return started.has(name) && interestedServiceType(client.name) !== "marketing";
   });
   const role = sessionAccount()?.role;
   function employeeNames(codes) {
@@ -179,6 +214,8 @@ function ProjectPage({ data, commit, canEdit, username, own = false }) {
     if (!project.name.trim()) return "Project name is required.";
     const exists = data.projects.some((item) => item.id === project.id);
     const previous = data.projects.find((item) => item.id === project.id);
+    if (project.startDate && !dateIsAllowed(project.startDate, previous?.startDate || "")) return "Start date cannot be before today.";
+    if (project.dueDate && !dateIsAllowed(project.dueDate, previous?.dueDate || "")) return "Due date cannot be before today.";
     if (exists && previous && !canEditProjectShell(role, previous) && previous.type === "marketing") {
       return "Marketing manages this project. You can monitor it without editing.";
     }
@@ -205,9 +242,47 @@ function ProjectPage({ data, commit, canEdit, username, own = false }) {
       milestones: (project.milestones || []).map((item) => (
         project.type === "marketing" ? { ...item, department: "marketing" } : { ...item, department: item.department || "software" }
       )),
-      code: project.code || nextCompanyProjectCode(),
+      code: project.code || "",
     };
-    const projects = exists ? data.projects.map((item) => (item.id === saved.id ? saved : item)) : [saved, ...data.projects];
+    const interest = interestedServiceType(saved.client);
+    if (interest === "both" || saved.type === "both") saved.type = "both";
+    const linked = clientProject(saved.client, { own, username });
+    const foreignOwner = project.owner && project.owner !== username ? project.owner : "";
+    if (linked?.code) {
+      saved.code = canonicalProjectCode(linked.code) || linked.code;
+    } else if (!exists) {
+      const wanted = canonicalProjectCode(saved.code) || saved.code;
+      saved.code = (wanted && claimProjectCode(wanted, { exact: true })) || nextCompanyProjectCode();
+    } else if (!saved.code) {
+      saved.code = nextCompanyProjectCode();
+    }
+    if (!exists && linked && linked.owner !== username) {
+      const shared = {
+        ...linked,
+        ...saved,
+        id: linked.id,
+        owner: linked.owner,
+        code: canonicalProjectCode(linked.code) || linked.code || saved.code,
+        type: "both",
+      };
+      saveSharedProject(linked.owner, shared);
+      publishClients();
+      setStamp((value) => value + 1);
+      setEditing(null);
+      return "";
+    }
+    if (exists && foreignOwner) {
+      saveSharedProject(foreignOwner, { ...saved, id: project.id, code: project.code || saved.code, type: saved.type });
+      publishClients();
+      setStamp((value) => value + 1);
+      setEditing(null);
+      return "";
+    }
+    delete saved.owner;
+    const adopted = linked && linked.owner === username && !exists;
+    const projects = adopted
+      ? data.projects.map((item) => (item.id === linked.id ? { ...saved, id: linked.id, code: canonicalProjectCode(linked.code) || linked.code || saved.code } : item))
+      : exists ? data.projects.map((item) => (item.id === saved.id ? saved : item)) : [saved, ...data.projects];
     const manager = sessionAccount()?.username || "Your project manager";
     const before = new Set(normalizeAssignees(previous?.assignees));
     assignees.filter((code) => !before.has(code)).forEach((code) => {
@@ -215,7 +290,7 @@ function ProjectPage({ data, commit, canEdit, username, own = false }) {
     });
     const becameMarketing = saved.type === "marketing" || saved.type === "both";
     const wasMarketing = previous?.type === "marketing" || previous?.type === "both";
-    if (!own && becameMarketing && (!exists || !wasMarketing)) {
+    if (!own && becameMarketing && !adopted && (!exists || !wasMarketing)) {
       notifyRole("marketing", `${manager} created ${TYPE_LABEL[saved.type] || "a project"} “${saved.name}” for ${saved.client || "a client"}. Open Project maintenance.`);
     }
     saveProjects({ ...data, projects });
@@ -247,54 +322,75 @@ function ProjectPage({ data, commit, canEdit, username, own = false }) {
         </div>
         <div className="modal-actions">
           {canEdit && !archiveOpen ? <button className="ghost" type="button" onClick={() => setAsking(true)}>Archived projects</button> : null}
-          {canEdit && !archiveOpen ? <button className="primary" type="button" onClick={() => setEditing(blankProject())}>New project</button> : null}
+          {canEdit && !archiveOpen ? <button className="primary" type="button" onClick={() => setEditing({ ...blankProject(), code: suggestCompanyProjectCode() })}>New project</button> : null}
         </div>
       </div>
       <article className="panel">
+        <div className="toolbar register-toolbar">
+          <input value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} placeholder="Search by project ID, name or client" />
+        </div>
         {rows.length === 0 ? (
           <p className="empty-copy">{archiveOpen ? "No archived projects." : "No active projects yet."}</p>
         ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>Project ID</th>
-                <th>Project</th>
-                <th>Type</th>
-                <th>Client</th>
-                <th>Employees</th>
-                <th>Status</th>
-                <th>Start</th>
-                <th>Due</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((project) => (
-                <tr key={project.id}>
-                  <td><code>{project.code || "—"}</code></td>
-                  <td>{project.name}</td>
-                  <td>{TYPE_LABEL[project.type] || "—"}</td>
-                  <td>{project.client || "—"}</td>
-                  <td>{employeeNames(project.type === "marketing" ? project.marketingAssignees : [...normalizeAssignees(project.assignees), ...normalizeAssignees(project.marketingAssignees)])}</td>
-                  <td><span className={`project-status ${project.status}`}>{STATUS_LABEL[project.status]}</span></td>
-                  <td>{formatDate(project.startDate)}</td>
-                  <td>{formatDate(project.dueDate)}</td>
-                  <td>
-                    <div className="icon-actions">
-                      <IconButton label={`View ${project.name}`} onClick={() => setViewing(project)}><EyeIcon /></IconButton>
-                      {canEdit && !archiveOpen && canEditProjectShell(role, project) ? <IconButton label={`Edit ${project.name}`} onClick={() => setEditing(project)}><EditIcon /></IconButton> : null}
-                      <IconButton label={`Milestones for ${project.name}`} onClick={() => setMilestones(project)}><FlagIcon /></IconButton>
-                      {canEdit && !archiveOpen && canEditProjectShell(role, project) ? <IconButton label={`Archive ${project.name}`} onClick={() => setArchiving(project)}><ArchiveIcon /></IconButton> : null}
-                      {canEdit && archiveOpen ? (
-                        <button className="ghost" type="button" onClick={() => setArchived(project, false)}>Unarchive</button>
-                      ) : null}
-                    </div>
-                  </td>
+          <div
+            ref={tableWrap}
+            className={showAll ? "tablewrap register-scroll" : "tablewrap"}
+            style={showAll && pageHeight.current ? { height: pageHeight.current, maxHeight: pageHeight.current } : undefined}
+          >
+            <table className="lead-register">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Project ID</th>
+                  <th>Project / Client</th>
+                  <th>Type</th>
+                  <th>Employees</th>
+                  <th>Status</th>
+                  <th>Start</th>
+                  <th>Due</th>
+                  <th>Actions</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {visibleRows.map((project, index) => (
+                  <tr key={project.id}>
+                    <td>{pageStart + index + 1}</td>
+                    <td><button className="link-btn" type="button" onClick={() => setViewing(project)}>{project.code || "—"}</button></td>
+                    <td>
+                      <strong>{project.name}</strong>
+                      <div className="muted">{project.client || "No client"}</div>
+                    </td>
+                    <td>{TYPE_LABEL[project.type] || "—"}</td>
+                    <td>{employeeNames(project.type === "marketing" ? project.marketingAssignees : [...normalizeAssignees(project.assignees), ...normalizeAssignees(project.marketingAssignees)])}</td>
+                    <td><span className={`project-status ${project.status}`}>{STATUS_LABEL[project.status]}</span></td>
+                    <td>{formatDate(project.startDate)}</td>
+                    <td className={project.dueDate && project.dueDate < new Date().toISOString().slice(0, 10) && project.status !== "completed" ? "issue-overdue" : ""}>{formatDate(project.dueDate)}</td>
+                    <td>
+                      <div className="icon-actions">
+                        <IconButton label={`View ${project.name}`} onClick={() => setViewing(project)}><EyeIcon /></IconButton>
+                        {canEdit && !archiveOpen && canEditProjectShell(role, project) ? <IconButton label={`Edit ${project.name}`} onClick={() => setEditing(project)}><EditIcon /></IconButton> : null}
+                        <IconButton label={`Milestones for ${project.name}`} onClick={() => setMilestones(project)}><FlagIcon /></IconButton>
+                        {canEdit && !archiveOpen && canEditProjectShell(role, project) ? <IconButton label={`Archive ${project.name}`} onClick={() => setArchiving(project)}><ArchiveIcon /></IconButton> : null}
+                        {canEdit && archiveOpen ? (
+                          <button className="ghost" type="button" onClick={() => setArchived(project, false)}>Unarchive</button>
+                        ) : null}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
+        <div className="register-footer">
+          <span>Showing {rows.length === 0 ? 0 : pageStart + 1} to {pageStart + visibleRows.length} of {rows.length} projects</span>
+          <div className="register-pages">
+            {Array.from({ length: pageCount }, (_, index) => (
+              <button key={index + 1} type="button" className={!showAll && currentPage === index + 1 ? "active" : ""} onClick={() => { setShowAll(false); setPage(index + 1); }}>{index + 1}</button>
+            ))}
+            <button type="button" className={showAll ? "active" : ""} onClick={() => { setShowAll(true); setPage(1); }}>All</button>
+          </div>
+        </div>
       </article>
       {asking ? (
         <PasswordDialog
@@ -306,7 +402,7 @@ function ProjectPage({ data, commit, canEdit, username, own = false }) {
           }}
         />
       ) : null}
-      {editing ? <ProjectDialog project={editing} clients={clients} own={own} onClose={() => setEditing(null)} onSave={save} /> : null}
+      {editing ? <ProjectDialog project={editing} clients={clients} own={own} username={username} onClose={() => setEditing(null)} onSave={save} /> : null}
       {viewing ? <ProjectRead project={viewing} onClose={() => setViewing(null)} /> : null}
       {milestones ? <MilestoneRead project={milestones} onClose={() => setMilestones(null)} /> : null}
       {archiving ? (
@@ -339,11 +435,13 @@ function projectInitials(name) {
   return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
 }
 
-function MilestonePage({ data, commit, canEdit }) {
+function MilestonePage({ data, commit, canEdit, username, own = false }) {
   const [openId, setOpenId] = useState(null);
   const [editing, setEditing] = useState(null);
   const [removing, setRemoving] = useState(null);
-  const active = data.projects.filter((project) => !project.archived);
+  const [stamp, setStamp] = useState(0);
+  const active = (own ? data.projects : projectsForManager(data.projects, username)).filter((project) => !project.archived);
+  void stamp;
   const open = active.find((project) => project.id === openId) || null;
   const role = sessionAccount()?.role;
   const people = teamMembersFor("pm").filter((person) => person.status === "Active");
@@ -370,10 +468,15 @@ function MilestonePage({ data, commit, canEdit }) {
       ? open.milestones.map((item) => (item.id === saved.id ? saved : item))
       : [...open.milestones, saved];
     const nextProject = applyMilestoneTeam({ ...open, milestones }, saved);
-    commit({
-      ...data,
-      projects: data.projects.map((project) => (project.id === open.id ? nextProject : project)),
-    });
+    if (open.owner && open.owner !== username) {
+      saveSharedProject(open.owner, nextProject);
+      setStamp((value) => value + 1);
+    } else {
+      commit({
+        ...data,
+        projects: data.projects.map((project) => (project.id === open.id ? nextProject : project)),
+      });
+    }
     const before = new Set(normalizeAssignees(previous?.assignees));
     const manager = sessionAccount()?.username || "Project manager";
     assignees.filter((code) => !before.has(code)).forEach((code) => {
@@ -385,14 +488,16 @@ function MilestonePage({ data, commit, canEdit }) {
 
   function deleteMilestone(milestone) {
     if (!canManageDepartment(role, open, milestoneDepartment(milestone, open))) return;
-    commit({
-      ...data,
-      projects: data.projects.map((project) => (
-        project.id === open.id
-          ? { ...project, milestones: project.milestones.filter((item) => item.id !== milestone.id) }
-          : project
-      )),
-    });
+    const nextProject = { ...open, milestones: open.milestones.filter((item) => item.id !== milestone.id) };
+    if (open.owner && open.owner !== username) {
+      saveSharedProject(open.owner, nextProject);
+      setStamp((value) => value + 1);
+    } else {
+      commit({
+        ...data,
+        projects: data.projects.map((project) => (project.id === open.id ? nextProject : project)),
+      });
+    }
     setRemoving(null);
   }
 
@@ -599,7 +704,7 @@ function ownClientQuote(client) {
   };
 }
 
-function ProjectDialog({ project, clients = [], own = false, onClose, onSave }) {
+function ProjectDialog({ project, clients = [], own = false, username = "", onClose, onSave }) {
   const [draft, setDraft] = useState({ ...project, assignees: normalizeAssignees(project.assignees) });
   const [error, setError] = useState("");
   const quoteRecord = { name: draft.client, code: draft.clientCode, client: draft.client, clientCode: draft.clientCode };
@@ -610,16 +715,17 @@ function ProjectDialog({ project, clients = [], own = false, onClose, onSave }) 
   }
 
   function chooseClient(name) {
+    const nextCode = () => suggestCompanyProjectCode();
     if (!name) {
       setDraft((current) => ({
-        ...current,
-        client: "",
-        clientId: "",
-        clientCode: "",
-        packageName: "",
-        quoteNumber: "",
-        quoteId: "",
-        service: "",
+        ...blankProject(),
+        id: current.id,
+        code: nextCode(),
+        name: current.name,
+        description: current.description,
+        status: current.status,
+        startDate: current.startDate,
+        dueDate: current.dueDate,
       }));
       return;
     }
@@ -627,20 +733,50 @@ function ProjectDialog({ project, clients = [], own = false, onClose, onSave }) 
     const details = own ? chosen : (chosen || salesClientByName(name));
     const subject = chosen || { name, code: details?.code || "" };
     const quoteFields = own ? ownClientQuote(subject) : applyClientQuote(subject);
-    setDraft((current) => ({
-      ...current,
+    const linked = clientProject(name, { own, username });
+    const interest = interestedServiceType(name);
+    if (linked) {
+      setDraft({
+        ...linked,
+        owner: linked.owner,
+        client: name,
+        clientId: chosen?.id || linked.clientId || "",
+        clientCode: chosen?.code || details?.code || linked.clientCode || "",
+        code: canonicalProjectCode(linked.code) || linked.code || "",
+        email: chosen?.contactEmail || details?.email || linked.email || "",
+        phone: chosen?.contactPhone || details?.phone || linked.phone || "",
+        address: chosen?.address || details?.address || linked.address || "",
+        type: linked.type === "both" || interest === "both" ? "both" : linked.type,
+        packageName: quoteFields.packageName || linked.packageName || "",
+        quoteNumber: quoteFields.quoteNumber || linked.quoteNumber || "",
+        quoteId: quoteFields.quoteId || linked.quoteId || "",
+        service: quoteFields.service || linked.service || "",
+      });
+      return;
+    }
+    setDraft((current) => {
+      const carried = clientProject(current.client, { own, username }) ? "" : current;
+      return {
+      ...blankProject(),
+      name: carried ? current.name : "",
+      description: carried ? current.description : "",
+      status: carried ? current.status : "in-progress",
+      startDate: carried ? current.startDate : "",
+      dueDate: carried ? current.dueDate : "",
       client: name,
       clientId: chosen?.id || "",
       clientCode: chosen?.code || details?.code || "",
       email: chosen?.contactEmail || details?.email || "",
       phone: chosen?.contactPhone || details?.phone || "",
       address: chosen?.address || details?.address || "",
-      type: quoteFields.quote ? quoteFields.type : current.type,
+      code: nextCode(),
+      type: interest === "both" ? "both" : (quoteFields.quote ? quoteFields.type : (interest || "software")),
       packageName: quoteFields.packageName,
       quoteNumber: quoteFields.quoteNumber,
       quoteId: quoteFields.quoteId,
       service: quoteFields.service,
-    }));
+      };
+    });
   }
 
   function submit(event) {
@@ -662,7 +798,7 @@ function ProjectDialog({ project, clients = [], own = false, onClose, onSave }) 
               value={draft.client || ""}
               onChange={(event) => chooseClient(event.target.value)}
             >
-              <option value="">{clients.length ? "Select a client" : (own ? "Add a client under Clients first" : "No approved clients yet")}</option>
+              <option value="">{clients.length ? "Select a client" : (own ? "Add a client under Clients first" : "No clients have started a payment yet")}</option>
               {clients.map((item) => <option key={item.id} value={item.name}>{item.code ? `${item.code} · ` : ""}{item.name}</option>)}
               {draft.client && !clients.some((item) => item.name === draft.client) ? <option value={draft.client}>{draft.client}</option> : null}
             </select>
@@ -676,6 +812,10 @@ function ProjectDialog({ project, clients = [], own = false, onClose, onSave }) 
             </select>
           </label>
           {draft.client ? <PromisedPackagePanel quote={quote} /> : null}
+          <label>
+            Project ID
+            <input value={draft.code || ""} readOnly />
+          </label>
           <Field label="Project name" value={draft.name} onChange={(value) => setField("name", value)} required />
           <label>
             Status
@@ -1042,7 +1182,7 @@ function Field({ label, value, onChange, type = "text", className, required = fa
   return (
     <label className={className}>
       {label}
-      <input type={type} value={value} onChange={(event) => onChange(event.target.value)} required={required} />
+      <input type={type} min={type === "date" ? minSelectableDate(value) : undefined} value={value} onChange={(event) => onChange(event.target.value)} required={required} />
     </label>
   );
 }
