@@ -16,6 +16,7 @@ import {
   REGISTRY_KEY,
   RegistryError,
   assignUniqueLeadIds,
+  keepExistingSalesLeads,
   claimRegistryCode,
   restoreClonedLeads,
   leadPhoneOwner,
@@ -918,6 +919,7 @@ export function createApp() {
         continue;
       }
       if (item.deleted) {
+        if (req.user.role === "sales" && item.key === "neon-crm-sales") continue;
         await Store.deleteOne({ key: item.key, owner: item.owner });
         continue;
       }
@@ -941,6 +943,9 @@ export function createApp() {
         }, 0);
         data = restoreClonedLeads(data, current);
         data = assignUniqueLeadIds(data, floor, current.leads || []);
+        if (req.user.role === "sales" && item.owner === req.user.username) {
+          data = keepExistingSalesLeads(data, current);
+        }
         if (Array.isArray(data.leads)) {
           data = {
             ...data,

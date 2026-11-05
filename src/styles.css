@@ -420,6 +420,11 @@ textarea:focus {
   min-height: 100vh;
   display: grid;
   grid-template-columns: 268px minmax(0, 1fr);
+  transition: grid-template-columns 0.22s ease;
+}
+
+.shell.sidebar-collapsed {
+  grid-template-columns: 0 minmax(0, 1fr);
 }
 
 .sidebar {
@@ -433,7 +438,53 @@ textarea:focus {
   top: 0;
   height: 100vh;
   z-index: 8;
+  min-width: 0;
   overflow: hidden;
+  transition: padding 0.22s ease, opacity 0.22s ease;
+}
+
+.shell.sidebar-collapsed .sidebar {
+  padding: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.sidebar-collapse {
+  position: fixed;
+  z-index: 20;
+  top: 50%;
+  left: 254px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--navy);
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+  transform: translateY(-50%);
+  transition: left 0.22s ease, background 0.15s ease;
+}
+
+.sidebar-collapse svg {
+  width: 16px;
+  height: 16px;
+  transition: transform 0.22s ease;
+}
+
+.shell.sidebar-collapsed .sidebar-collapse {
+  left: 10px;
+}
+
+.shell.sidebar-collapsed .sidebar-collapse svg {
+  transform: rotate(180deg);
+}
+
+.sidebar-collapse:hover {
+  background: #F5F6FC;
 }
 
 .sidebar-lockup {
@@ -1086,7 +1137,7 @@ tbody tr:hover td {
   background: #fff;
   color: var(--violet);
   border: 1px solid #E2E5F0;
-  border-radius: 6px;
+  border-radius: 10px;
   padding: 7px 12px;
   font-weight: 650;
   font-size: 13px;
@@ -1106,9 +1157,14 @@ tbody tr:hover td {
   color: white;
   border: 0;
   border-radius: 10px;
-  padding: 12px 16px;
-  font-weight: 700;
+  padding: 8px 14px;
+  min-height: 36px;
+  font-size: 13px;
+  font-weight: 650;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .danger-button:hover {
@@ -1195,7 +1251,7 @@ td a {
   width: 32px;
   height: 32px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 10px;
   background: white;
   color: var(--violet);
   display: grid;
@@ -6060,6 +6116,10 @@ body.nav-locked {
     min-height: 100dvh;
   }
 
+  .sidebar-collapse {
+    display: none;
+  }
+
   .nav-toggle,
   .sidebar-close {
     display: grid;
@@ -6343,5 +6403,247 @@ body.nav-locked {
 
   .icon-actions {
     flex-wrap: wrap;
+  }
+}
+
+.register-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 12px 14px 2px;
+}
+
+.register-toolbar input,
+.register-toolbar select {
+  min-width: 140px;
+  min-height: 36px;
+}
+
+.register-toolbar input[type="search"],
+.register-toolbar input[type="text"],
+.register-toolbar input:not([type]) {
+  flex: 1 1 220px;
+  min-width: 180px;
+  max-width: none;
+}
+
+.register-toolbar select {
+  flex: 0 1 156px;
+}
+
+.register-date.report-period {
+  min-width: 168px;
+  flex: 0 1 210px;
+  gap: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.register-date .report-period-trigger {
+  min-height: 36px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.register-date .report-period-trigger span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.register-date .report-calendar {
+  left: 0;
+  right: auto;
+}
+
+.register-date .report-calendar-actions {
+  flex-wrap: wrap;
+}
+
+.panel:has(.register-toolbar) {
+  overflow: visible;
+}
+
+.register-toolbar .lead-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: auto;
+  align-items: center;
+}
+
+.register-toolbar .primary,
+.register-toolbar .ghost,
+.lead-header-actions .primary,
+.lead-header-actions .ghost {
+  white-space: nowrap;
+}
+
+.lead-register {
+  width: 100%;
+}
+
+.lead-register .check-cell {
+  width: 36px;
+}
+
+.lead-register td,
+.lead-register th {
+  vertical-align: middle;
+}
+
+.register-phone {
+  display: block;
+  font-variant-numeric: tabular-nums;
+}
+
+.register-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  color: #68758c;
+  font-size: 13px;
+}
+
+.register-pages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.register-pages button {
+  min-width: 34px;
+  height: 34px;
+  padding: 0 8px;
+  border-radius: 8px;
+  background: #fff;
+  border: 1px solid #e4e8f0;
+  color: #243044;
+}
+
+.register-pages button.active {
+  background: #873CFF;
+  border-color: #873CFF;
+  color: #fff;
+}
+
+.register-selection {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #fff4f4;
+}
+
+.field-invalid input,
+.input-invalid {
+  border-color: #e11d48;
+  box-shadow: 0 0 0 3px rgba(225, 29, 72, 0.12);
+}
+
+.field-error {
+  display: block;
+  margin-top: 6px;
+  color: #e11d48;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.panel.sales-leads,
+.panel:has(.register-scroll) {
+  overflow: visible;
+}
+
+.register-scroll {
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.register-scroll table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.register-scroll thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #EEF0F8;
+  box-shadow: inset 0 -1px 0 var(--line);
+}
+
+.lead-register .check-cell,
+.lead-register .icon-actions {
+  text-align: center;
+}
+
+.lead-register .icon-actions {
+  display: inline-flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.plain-fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.plain-fieldset:disabled {
+  opacity: 1;
+}
+
+.modal .page-note {
+  margin: 0 0 12px;
+}
+
+.primary,
+.ghost,
+.danger-button {
+  white-space: nowrap;
+}
+
+.sales-grid > label,
+.goal-grid > label,
+.package-grid > label {
+  min-width: 0;
+}
+
+.sales-grid input,
+.sales-grid select,
+.sales-grid textarea,
+.goal-grid input,
+.goal-grid select,
+.goal-grid textarea {
+  width: 100%;
+}
+
+.content > .stack,
+.workspace .content > .stack {
+  gap: 14px;
+}
+
+@media (max-width: 720px) {
+  .register-footer {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .register-toolbar .lead-header-actions {
+    margin-left: 0;
+    width: 100%;
+  }
+
+  .content {
+    padding: 12px 12px 24px;
   }
 }

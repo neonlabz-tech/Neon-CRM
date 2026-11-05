@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { formatPhone } from "./hrms.js";
+import { LeadPhoneField, LeadRegister } from "./LeadRegister.jsx";
+import { refreshSalesAccounts } from "./storage.js";
 import { wrapLetterhead } from "./letterhead.js";
 import { ScopeHtml } from "./ScopeEditor.jsx";
 import {
@@ -10,7 +12,6 @@ import {
   LEAD_SOURCES,
   LEAD_STAGES,
   leadServiceOptions,
-  LEAD_PHONE_EXISTS_MESSAGE,
   OPEN_SALES_APPROVAL,
   SALE_STATUS_LABEL,
   SALE_STATUSES,
@@ -34,6 +35,7 @@ import {
   saveCeoManualSale,
   saveCeoOrgSettings,
   saveCeoStaffMember,
+  deleteCompanyLeads,
   saveCompanyLead,
   UNASSIGNED_OWNER,
   staffCommissionRate,
@@ -90,7 +92,21 @@ export function CeoSalesWorkspace({ initialTab }) {
 
   useEffect(() => {
     releaseSalesPaymentsForApproval();
-    setRevision((value) => value + 1);
+    let stop = false;
+    async function pull() {
+      try {
+        const changed = await refreshSalesAccounts();
+        if (!stop && changed) setRevision((value) => value + 1);
+      } catch {
+        // The leads already loaded stay on screen.
+      }
+    }
+    pull();
+    const timer = window.setInterval(pull, 15000);
+    return () => {
+      stop = true;
+      window.clearInterval(timer);
+    };
   }, []);
 
   useEffect(() => startMissionClock(setMission), []);
@@ -497,104 +513,41 @@ function QuoteDetails({ row, onClose }) {
 }
 
 function LeadsPage(props) {
-  const { scopedLeads, staff, notify, refresh } = props;
-  const [query, setQuery] = useState("");
-  const [status, setStatus] = useState("");
-  const [person, setPerson] = useState("");
+  const { leads, staff, notify, refresh } = props;
   const [open, setOpen] = useState(null);
-  const today = todayISO();
-  const rows = scopedLeads.filter((lead) => {
-    const hay = `${lead.id} ${lead.business} ${lead.phone} ${lead.source} ${lead.service}`.toLowerCase();
-    if (query && !hay.includes(query.toLowerCase())) return false;
-    if (status && lead.status !== status) return false;
-    if (person && lead.owner !== person) return false;
-    return true;
-  });
 
   function save(draft) {
     const result = saveCompanyLead(draft);
-    if (!result.ok) {
-      if (result.error === LEAD_PHONE_EXISTS_MESSAGE) window.alert(result.error);
-      return result.error;
-    }
+    if (!result.ok) return result.error;
     refresh();
     notify(open?.business ? "Lead updated" : "Lead created");
     setOpen(null);
     return "";
   }
 
+  function removeSelected(rows) {
+    const result = deleteCompanyLeads(rows);
+    refresh();
+    if (result.error) notify(result.error);
+    else notify(rows.length === 1 ? "Lead deleted" : "Leads deleted");
+    if ((rows || []).some((lead) => lead.id === open?.id && lead.owner === open?.owner)) setOpen(null);
+    return result.error || "";
+  }
+
   return (
     <div className="stack">
-      <div className="toolbar">
-        <div className="icon-actions">
-          <button className="ghost" type="button" onClick={() => exportLeads(rows, props)}>Export PDF</button>
-          <button
-            className="primary"
-            type="button"
-            onClick={() => setOpen(blankLead("", reserveNextLeadId()))}
-          >
-            + Add Lead
-          </button>
-        </div>
-      </div>
-      <ScopeBar {...props} />
       <article className="panel">
-        <div className="toolbar">
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search Lead ID, business, phone, source, service..." />
-          <select value={status} onChange={(event) => setStatus(event.target.value)}>
-            <option value="">All statuses</option>
-            {LEAD_STAGES.map((item) => <option key={item}>{item}</option>)}
-          </select>
-          <select value={person} onChange={(event) => setPerson(event.target.value)}>
-            <option value="">All salespersons</option>
-            <option value={UNASSIGNED_OWNER}>Not assigned</option>
-            {staff.map((user) => <option key={user.username} value={user.username}>{salesStaffName(user.username)}</option>)}
-          </select>
-        </div>
-        <div className="ceo-lead-summary">
-          <b>{rows.length} shown / {scopedLeads.length} total leads</b>
-        </div>
-        {rows.length === 0 ? <p className="empty-copy">No leads match the selected filters.</p> : (
-          <div className="tablewrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>No.</th>
-                  <th>Lead ID</th>
-                  <th>Business / Customer</th>
-                  <th className="phone-cell">Phone</th>
-                  <th>Source</th>
-                  <th>Interested Service</th>
-                  <th>Assigned To</th>
-                  <th>Status</th>
-                  <th>Follow-ups</th>
-                  <th>Next Follow-up</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((lead, index) => {
-                  const overdue = lead.next && lead.next < today && lead.status !== "Converted" && lead.status !== "Lost";
-                  return (
-                    <tr key={`${lead.owner}:${lead.id}`}>
-                      <td>{index + 1}</td>
-                      <td>
-                        <button className="link-btn" type="button" onClick={() => setOpen(lead)}>{lead.id}</button>
-                      </td>
-                      <td><strong>{lead.business}</strong></td>
-                      <td className="phone-cell">{lead.phone || "—"}</td>
-                      <td>{lead.source}</td>
-                      <td>{lead.service || "—"}</td>
-                      <td>{salesStaffName(lead.owner)}</td>
-                      <td><StatusPill value={lead.status} /></td>
-                      <td><b>{(lead.calls || []).length}</b></td>
-                      <td className={overdue ? "issue-overdue" : ""}>{lead.next || "—"}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
+        <LeadRegister
+          leads={leads}
+          canEdit
+          canRevise
+          canDelete
+          staff={staff}
+          onOpen={setOpen}
+          onAdd={() => setOpen(blankLead("", reserveNextLeadId()))}
+          onDelete={removeSelected}
+          extraActions={<button className="ghost" type="button" onClick={() => exportLeads(leads, props)}>Download PDF</button>}
+        />
       </article>
       {open ? (
         <LeadEditor
@@ -1027,10 +980,7 @@ function LeadEditor({ lead, staff, nextId, onClose, onSave }) {
             Business / Customer
             <input value={draft.business} onChange={(event) => setDraft({ ...draft, business: event.target.value })} required />
           </label>
-          <label>
-            Phone
-            <input type="tel" value={draft.phone} onChange={(event) => setDraft({ ...draft, phone: formatPhone(event.target.value) })} required />
-          </label>
+          <LeadPhoneField value={draft.phone} exceptId={existing ? draft.id : ""} onChange={(phone) => setDraft({ ...draft, phone })} />
           <label>
             Source
             <select value={draft.source || "Other"} onChange={(event) => setDraft({ ...draft, source: event.target.value })}>

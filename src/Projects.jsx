@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { verifyPassword } from "./crm.js";
 import { notifyRole, notifyUser } from "./finance.js";
@@ -122,9 +122,8 @@ function SalesProjects() {
         <table>
           <thead>
             <tr>
-              <th>Client</th>
+              <th>Phone / Customer</th>
               <th>Email</th>
-              <th>Phone</th>
               <th>Address</th>
               <th>Sales admin</th>
               <th>Follow-up</th>
@@ -134,9 +133,11 @@ function SalesProjects() {
           <tbody>
             {incoming.map((project) => (
               <tr key={project.id}>
-                <td>{project.name}</td>
+                <td>
+                  <strong className="register-phone">{project.phone || "—"}</strong>
+                  <div className="muted">{project.name}</div>
+                </td>
                 <td>{project.email || "—"}</td>
-                <td>{project.phone || "—"}</td>
                 <td>{project.address || "—"}</td>
                 <td>{project.salesOwner}</td>
                 <td>{formatDate(project.date)}</td>
@@ -158,9 +159,36 @@ function ProjectPage({ data, commit, canEdit, username, own = false }) {
   const [milestones, setMilestones] = useState(null);
   const [archiving, setArchiving] = useState(null);
   const [stamp, setStamp] = useState(0);
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(1);
+  const [showAll, setShowAll] = useState(false);
+  const tableWrap = useRef(null);
+  const pageHeight = useRef(0);
   const listed = own ? data.projects : projectsForManager(data.projects, username);
   const counts = projectCounts(listed);
-  const rows = listed.filter((project) => project.archived === archiveOpen);
+  const rows = listed.filter((project) => project.archived === archiveOpen).filter((project) => {
+    const hay = `${project.code} ${project.name} ${project.client}`.toLowerCase();
+    return !query || hay.includes(query.toLowerCase());
+  });
+  const pageSize = showAll ? Math.max(rows.length, 1) : 10;
+  const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+  const currentPage = Math.min(page, pageCount);
+  const pageStart = rows.length === 0 ? 0 : (currentPage - 1) * pageSize;
+  const visibleRows = rows.slice(pageStart, pageStart + pageSize);
+
+  useLayoutEffect(() => {
+    if (showAll || !tableWrap.current) return;
+    const node = tableWrap.current;
+    if (visibleRows.length === 10 || rows.length <= 10) {
+      pageHeight.current = node.offsetHeight;
+      return;
+    }
+    if (!pageHeight.current && visibleRows.length > 0) {
+      const head = node.querySelector("thead")?.offsetHeight || 0;
+      const row = node.querySelector("tbody tr")?.offsetHeight || 0;
+      if (row) pageHeight.current = head + row * 10;
+    }
+  }, [showAll, visibleRows, rows.length]);
   void stamp;
   const people = teamMembersFor("pm");
   const salesNames = own
@@ -298,50 +326,71 @@ function ProjectPage({ data, commit, canEdit, username, own = false }) {
         </div>
       </div>
       <article className="panel">
+        <div className="toolbar register-toolbar">
+          <input value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} placeholder="Search by project ID, name or client" />
+        </div>
         {rows.length === 0 ? (
           <p className="empty-copy">{archiveOpen ? "No archived projects." : "No active projects yet."}</p>
         ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>Project ID</th>
-                <th>Project</th>
-                <th>Type</th>
-                <th>Client</th>
-                <th>Employees</th>
-                <th>Status</th>
-                <th>Start</th>
-                <th>Due</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((project) => (
-                <tr key={project.id}>
-                  <td><code>{project.code || "—"}</code></td>
-                  <td>{project.name}</td>
-                  <td>{TYPE_LABEL[project.type] || "—"}</td>
-                  <td>{project.client || "—"}</td>
-                  <td>{employeeNames(project.type === "marketing" ? project.marketingAssignees : [...normalizeAssignees(project.assignees), ...normalizeAssignees(project.marketingAssignees)])}</td>
-                  <td><span className={`project-status ${project.status}`}>{STATUS_LABEL[project.status]}</span></td>
-                  <td>{formatDate(project.startDate)}</td>
-                  <td>{formatDate(project.dueDate)}</td>
-                  <td>
-                    <div className="icon-actions">
-                      <IconButton label={`View ${project.name}`} onClick={() => setViewing(project)}><EyeIcon /></IconButton>
-                      {canEdit && !archiveOpen && canEditProjectShell(role, project) ? <IconButton label={`Edit ${project.name}`} onClick={() => setEditing(project)}><EditIcon /></IconButton> : null}
-                      <IconButton label={`Milestones for ${project.name}`} onClick={() => setMilestones(project)}><FlagIcon /></IconButton>
-                      {canEdit && !archiveOpen && canEditProjectShell(role, project) ? <IconButton label={`Archive ${project.name}`} onClick={() => setArchiving(project)}><ArchiveIcon /></IconButton> : null}
-                      {canEdit && archiveOpen ? (
-                        <button className="ghost" type="button" onClick={() => setArchived(project, false)}>Unarchive</button>
-                      ) : null}
-                    </div>
-                  </td>
+          <div
+            ref={tableWrap}
+            className={showAll ? "tablewrap register-scroll" : "tablewrap"}
+            style={showAll && pageHeight.current ? { height: pageHeight.current, maxHeight: pageHeight.current } : undefined}
+          >
+            <table className="lead-register">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Project ID</th>
+                  <th>Project / Client</th>
+                  <th>Type</th>
+                  <th>Employees</th>
+                  <th>Status</th>
+                  <th>Start</th>
+                  <th>Due</th>
+                  <th>Actions</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {visibleRows.map((project, index) => (
+                  <tr key={project.id}>
+                    <td>{pageStart + index + 1}</td>
+                    <td><button className="link-btn" type="button" onClick={() => setViewing(project)}>{project.code || "—"}</button></td>
+                    <td>
+                      <strong>{project.name}</strong>
+                      <div className="muted">{project.client || "No client"}</div>
+                    </td>
+                    <td>{TYPE_LABEL[project.type] || "—"}</td>
+                    <td>{employeeNames(project.type === "marketing" ? project.marketingAssignees : [...normalizeAssignees(project.assignees), ...normalizeAssignees(project.marketingAssignees)])}</td>
+                    <td><span className={`project-status ${project.status}`}>{STATUS_LABEL[project.status]}</span></td>
+                    <td>{formatDate(project.startDate)}</td>
+                    <td className={project.dueDate && project.dueDate < new Date().toISOString().slice(0, 10) && project.status !== "completed" ? "issue-overdue" : ""}>{formatDate(project.dueDate)}</td>
+                    <td>
+                      <div className="icon-actions">
+                        <IconButton label={`View ${project.name}`} onClick={() => setViewing(project)}><EyeIcon /></IconButton>
+                        {canEdit && !archiveOpen && canEditProjectShell(role, project) ? <IconButton label={`Edit ${project.name}`} onClick={() => setEditing(project)}><EditIcon /></IconButton> : null}
+                        <IconButton label={`Milestones for ${project.name}`} onClick={() => setMilestones(project)}><FlagIcon /></IconButton>
+                        {canEdit && !archiveOpen && canEditProjectShell(role, project) ? <IconButton label={`Archive ${project.name}`} onClick={() => setArchiving(project)}><ArchiveIcon /></IconButton> : null}
+                        {canEdit && archiveOpen ? (
+                          <button className="ghost" type="button" onClick={() => setArchived(project, false)}>Unarchive</button>
+                        ) : null}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
+        <div className="register-footer">
+          <span>Showing {rows.length === 0 ? 0 : pageStart + 1} to {pageStart + visibleRows.length} of {rows.length} projects</span>
+          <div className="register-pages">
+            {Array.from({ length: pageCount }, (_, index) => (
+              <button key={index + 1} type="button" className={!showAll && currentPage === index + 1 ? "active" : ""} onClick={() => { setShowAll(false); setPage(index + 1); }}>{index + 1}</button>
+            ))}
+            <button type="button" className={showAll ? "active" : ""} onClick={() => { setShowAll(true); setPage(1); }}>All</button>
+          </div>
+        </div>
       </article>
       {asking ? (
         <PasswordDialog

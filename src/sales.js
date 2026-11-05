@@ -671,6 +671,7 @@ function normalizeLead(item) {
     notes: String(item.notes || ""),
     executive: String(item.executive || ""),
     clientCode: String(item.clientCode || "").trim(),
+    createdAt: String(item.createdAt || ""),
     contact: email && phone ? `${email} · ${phone}` : String(item.contact || phone || email),
     calls: Array.isArray(item.calls) ? item.calls.map(normalizeCall).filter(Boolean) : [],
   };
@@ -818,12 +819,33 @@ export function reserveNextLeadId(data) {
   return previewNextLeadId(data);
 }
 
-export function leadPhoneTaken(phone, exceptId = "") {
+export function leadPhoneConflict(phone, exceptId = "") {
   const digits = phoneDigits(phone);
-  if (digits.length !== 10) return false;
-  const local = harvestLeadIndex().phones[digits];
-  const shared = leadPhoneHolder(phone);
-  return [local, shared].some((holder) => holder && holder !== exceptId);
+  if (digits.length !== 10) return null;
+  let found = null;
+  eachSalesAccount((raw) => {
+    if (found) return;
+    (raw?.leads || []).some((lead) => {
+      if (!lead?.id || lead.id === exceptId) return false;
+      if (phoneDigits(lead.phone) !== digits) return false;
+      found = { id: lead.id, business: String(lead.business || lead.name || "").trim() };
+      return true;
+    });
+  });
+  if (found) return found;
+  const holder = harvestLeadIndex().phones[digits] || leadPhoneHolder(phone);
+  if (holder && holder !== exceptId) return { id: holder, business: "" };
+  return null;
+}
+
+export function leadPhoneConflictMessage(phone, exceptId = "") {
+  const conflict = leadPhoneConflict(phone, exceptId);
+  if (!conflict) return "";
+  return `This phone number is already added in lead ${conflict.id}.`;
+}
+
+export function leadPhoneTaken(phone, exceptId = "") {
+  return Boolean(leadPhoneConflict(phone, exceptId));
 }
 
 export function dueLeads(leads, day = todayISO()) {
@@ -2023,9 +2045,8 @@ export function saveLead(data, draft) {
   const digits = phoneDigits(phone);
   if (phoneError(phone)) return { ok: false, error: PHONE_ERROR };
   const samePhone = existing && phoneDigits(existing.phone) === digits;
-  if (digits.length === 10 && !samePhone && leadPhoneTaken(phone, existing?.id || "")) {
-    return { ok: false, error: LEAD_PHONE_EXISTS_MESSAGE };
-  }
+  const phoneConflict = digits.length === 10 && !samePhone ? leadPhoneConflictMessage(phone, existing?.id || "") : "";
+  if (phoneConflict) return { ok: false, error: phoneConflict };
   const email = String(draft.email || "").trim();
   const address = String(draft.address || "").trim();
   if (status === "Converted") {
@@ -2087,6 +2108,7 @@ export function saveLead(data, draft) {
     notes: String(draft.notes || "").trim(),
     executive: String(draft.executive || existing?.executive || ""),
     clientCode: nextStatus === "Converted" ? (existing?.clientCode || "") : "",
+    createdAt: existing?.createdAt || new Date().toISOString(),
     calls,
   });
   if (lastCall && draft.call) {
@@ -2101,7 +2123,7 @@ export function saveLead(data, draft) {
   if (next.clientCode) noteClientCode(next.clientCode);
   const phoneAccepted = rememberLeadPhone(next.id, next.phone);
   if (digits.length === 10 && !samePhone && !phoneAccepted) {
-    return { ok: false, error: LEAD_PHONE_EXISTS_MESSAGE };
+    return { ok: false, error: leadPhoneConflictMessage(phone, next.id) || LEAD_PHONE_EXISTS_MESSAGE };
   }
   const currentLeads = Array.isArray(data.leads) ? data.leads : [];
   let replacedLead = false;
@@ -2498,6 +2520,33 @@ export function saveCompanyLead(draft) {
     );
   }
   return { ok: true };
+}
+
+export function deleteCompanyLeads(rows) {
+  const session = sessionAccount();
+  if (session?.role !== "ceo") return { ok: false, error: "Only the CEO can delete these leads." };
+  const notes = [];
+  const grouped = new Map();
+  (rows || []).forEach((row) => {
+    const owner = row?.owner || findLeadStore(row?.id) || UNASSIGNED_OWNER;
+    const ids = grouped.get(owner) || [];
+    ids.push(row.id);
+    grouped.set(owner, ids);
+  });
+  grouped.forEach((ids, owner) => {
+    let data = loadSalesAccountData(owner);
+    let changed = false;
+    ids.forEach((id) => {
+      const result = deleteLead(data, id);
+      if (!result.ok) notes.push(`${id}: ${result.error}`);
+      else {
+        data = result.data;
+        changed = true;
+      }
+    });
+    if (changed) persistSalesAccount(owner, data);
+  });
+  return { ok: notes.length === 0, error: notes.join(" ") };
 }
 
 function paymentSaleStatus(payment) {

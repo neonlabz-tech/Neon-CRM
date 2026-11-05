@@ -338,7 +338,6 @@ export function rememberLeadPhone(leadId, phone) {
 export function forgetLeadPhone(leadId) {
   const id = String(leadId || "").trim();
   if (!id) return;
-  registryRequest("POST", "/api/registry/phone/release", { leadId: id });
   const registry = load();
   let changed = false;
   Object.keys(registry.phones).forEach((key) => {
@@ -348,4 +347,13 @@ export function forgetLeadPhone(leadId) {
     }
   });
   if (changed) save(registry);
+  void fetch("/api/registry/phone/release", {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      ...(readSession()?.token ? { Authorization: `Bearer ${readSession().token}` } : {}),
+    },
+    body: JSON.stringify({ leadId: id }),
+  }).catch(() => undefined);
 }

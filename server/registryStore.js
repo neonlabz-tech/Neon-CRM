@@ -408,6 +408,27 @@ export function restoreClonedLeads(incoming, stored) {
   return { ...incoming, leads, followUps: Array.isArray(stored?.followUps) ? stored.followUps : incoming.followUps };
 }
 
+export function keepExistingSalesLeads(incoming, stored) {
+  const storedLeads = Array.isArray(stored?.leads) ? stored.leads.filter((lead) => lead?.id) : [];
+  const storedIds = new Set(storedLeads.map((lead) => String(lead.id)));
+  const incomingLeads = Array.isArray(incoming?.leads) ? incoming.leads : [];
+  const seen = new Set(storedIds);
+  const additions = [];
+  incomingLeads.forEach((lead) => {
+    const id = String(lead?.id || "");
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    additions.push(lead);
+  });
+  const storedFollow = Array.isArray(stored?.followUps) ? stored.followUps : [];
+  const incomingFollow = Array.isArray(incoming?.followUps) ? incoming.followUps : [];
+  const followUps = [
+    ...storedFollow.filter((item) => item?.id && storedIds.has(String(item.id))),
+    ...incomingFollow.filter((item) => item?.id && !storedIds.has(String(item.id))),
+  ];
+  return { ...incoming, leads: [...storedLeads, ...additions], followUps };
+}
+
 export function assignUniqueLeadIds(data, floor = 0, storedLeads = undefined) {
   if (!data || !Array.isArray(data.leads)) return data;
   const sequencingNewLeads = Array.isArray(storedLeads);

@@ -449,6 +449,9 @@ function Shell({ session, onSignOut }) {
   const [changingPassword, setChangingPassword] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [narrow, setNarrow] = useState(() => window.matchMedia("(max-width: 900px)").matches);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try { return sessionStorage.getItem("neon-crm-sidebar") === "collapsed"; } catch { return false; }
+  });
   const page = history[history.length - 1];
   const current = findNav(page) ?? items[0];
   const access = accessFor(session.role, current.id);
@@ -468,6 +471,10 @@ function Shell({ session, onSignOut }) {
     query.addEventListener("change", sync);
     return () => query.removeEventListener("change", sync);
   }, []);
+
+  useEffect(() => {
+    try { sessionStorage.setItem("neon-crm-sidebar", sidebarCollapsed ? "collapsed" : "open"); } catch { /* storage can be blocked */ }
+  }, [sidebarCollapsed]);
 
   useEffect(() => {
     if (!menuOpen) return undefined;
@@ -515,10 +522,25 @@ function Shell({ session, onSignOut }) {
     if (!item.children.some((child) => child.id === current.id)) openPage(item.children[0].id, true);
   }
 
+  const sidebarHidden = (narrow && !menuOpen) || (!narrow && sidebarCollapsed);
+  const shellClass = ["shell", menuOpen ? "menu-open" : "", !narrow && sidebarCollapsed ? "sidebar-collapsed" : ""].filter(Boolean).join(" ");
+
   return (
-    <div className={menuOpen ? "shell menu-open" : "shell"}>
+    <div className={shellClass}>
       {menuOpen ? <button className="nav-scrim" type="button" aria-label="Close menu" onClick={() => setMenuOpen(false)} /> : null}
-      <aside className="sidebar" id="app-sidebar" aria-hidden={narrow && !menuOpen} inert={narrow && !menuOpen ? true : undefined}>
+      {narrow ? null : (
+        <button
+          className="sidebar-collapse"
+          type="button"
+          aria-label={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
+          aria-expanded={!sidebarCollapsed}
+          aria-controls="app-sidebar"
+          onClick={() => setSidebarCollapsed((value) => !value)}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 6 8 12l6 6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg>
+        </button>
+      )}
+      <aside className="sidebar" id="app-sidebar" aria-hidden={sidebarHidden} inert={sidebarHidden ? true : undefined}>
         <div className="sidebar-brand">
           <div className="sidebar-lockup">
             <img className="sidebar-logo" src={sidebarLogo} alt="NeonLabz" />

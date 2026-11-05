@@ -15,6 +15,7 @@ import { packageDocumentFromItem } from "./brandDocument.js";
 import { downloadDocumentPdf } from "./downloadPdf.js";
 import { formatPhone } from "./hrms.js";
 import { forgetLeadPhone } from "./registry.js";
+import { LeadPhoneField, LeadRegister } from "./LeadRegister.jsx";
 import { MonthField, monthLabel, reportingLabel } from "./ReportPeriod.jsx";
 import { companyProjects, loadProjects } from "./projects.js";
 import {
@@ -57,7 +58,6 @@ import {
   formatQuoteAmount,
   formatQuoteDate,
   leadsLoggedToday,
-  LEAD_PHONE_EXISTS_MESSAGE,
   loadIncomingProjects,
   loadCeoSales,
   loadSales,
@@ -81,7 +81,6 @@ import {
   saveClientQuote,
   saveCeoSales,
   saveLead,
-  sortLeadsById,
   savePackage,
   saveSales,
   COVER_HEIGHT,
@@ -225,7 +224,7 @@ export function SalesWorkspace({ access, username, section, paymentsSource, pers
       ) : null}
       {active === "sample" ? <SalesQuotationsPanel data={data} commit={commit} canEdit={canEdit} /> : null}
       {active === "payments" ? <PaymentsPanel data={data} commit={commit} canEdit={canEdit} month={month} range={range} source={paymentsSource} /> : null}
-      {active === "follow" ? <FollowUpPanel data={data} commit={commit} canEdit={canEdit} executives={executives} username={username} month={month} allowDelete={personal} /> : null}
+      {active === "follow" ? <FollowUpPanel data={data} commit={commit} canEdit={canEdit} executives={executives} username={username} month={month} allowDelete={canEdit} /> : null}
       {active === "packages" ? <PackagesPanel data={data} commit={commit} canEdit={canEdit} /> : null}
     </div>
   );
@@ -354,10 +353,7 @@ function OverviewPanel({ data, month, range, setMonth, setRange, executives, can
           onClose={() => setLeadForm(null)}
           onSave={(draftLead) => {
             const result = saveLead(data, draftLead);
-            if (!result.ok) {
-              if (result.error === LEAD_PHONE_EXISTS_MESSAGE) window.alert(result.error);
-              return result.error;
-            }
+            if (!result.ok) return result.error;
             const stored = commit(result.data);
             if (stored) return stored;
             setLeadForm(null);
@@ -1733,14 +1729,10 @@ function decodeCsvBuffer(buffer) {
 }
 
 function FollowUpPanel({ data, commit, canEdit, executives, username, month, allowDelete = false }) {
-  const today = todayISO();
   const csvInput = useRef(null);
   const alive = useRef(true);
   const [importing, setImporting] = useState(false);
-  const [query, setQuery] = useState("");
   const [notice, setNotice] = useState("");
-  const [status, setStatus] = useState("");
-  const [source, setSource] = useState("");
   const [open, setOpen] = useState(null);
   const [removing, setRemoving] = useState(null);
   const [error, setError] = useState("");
@@ -1752,21 +1744,18 @@ function FollowUpPanel({ data, commit, canEdit, executives, username, month, all
   }, []);
   const leads = data.leads || [];
   const canRemove = canEdit && allowDelete;
-  const rows = sortLeadsById(leads.filter((lead) => {
-    const hay = `${lead.id} ${lead.business} ${lead.phone}`.toLowerCase();
-    if (query && !hay.includes(query.toLowerCase())) return false;
-    if (status && lead.status !== status) return false;
-    if (source && lead.source !== source) return false;
-    return true;
-  }));
 
   function save(draft) {
+    if (!draft?.unsaved) {
+      const locked = "Existing leads cannot be changed.";
+      setError(locked);
+      return locked;
+    }
     const result = saveLead(data, {
       ...draft,
       executive: draft.executive || defaultExecutive(executives, username),
     });
     if (!result.ok) {
-      if (result.error === LEAD_PHONE_EXISTS_MESSAGE) window.alert(result.error);
       setError(result.error);
       return result.error;
     }
@@ -1780,39 +1769,40 @@ function FollowUpPanel({ data, commit, canEdit, executives, username, month, all
     return "";
   }
 
+  function removeSelected(rows) {
+    if (sessionAccount()?.role === "sales") return "Sales admins cannot delete leads.";
+    let current = data;
+    const notes = [];
+    (rows || []).forEach((lead) => {
+      const result = deleteLead(current, lead.id);
+      if (!result.ok) notes.push(`${lead.id}: ${result.error}`);
+      else current = result.data;
+    });
+    if (current !== data) {
+      const stored = commit(current);
+      if (stored) return stored;
+    }
+    setError(notes.join(" "));
+    setRemoving(null);
+    if ((rows || []).some((lead) => lead.id === open?.id)) setOpen(null);
+    return notes.join(" ");
+  }
+
   function removeLead(event) {
     event.preventDefault();
     if (!removing) return;
-    const result = deleteLead(data, removing.id);
-    if (!result.ok) {
-      setError(result.error);
-      return;
-    }
-    const stored = commit(result.data);
-    if (stored) {
-      setError(stored);
-      return;
-    }
-    setError("");
-    setRemoving(null);
-    if (open?.id === removing.id) setOpen(null);
+    removeSelected([removing]);
   }
 
   return (
     <div className="stack">
-      <div className="toolbar">
-        <div>
-          <h2>Leads</h2>
-        </div>
-        <div className="lead-header-actions">
-          {canEdit ? (
-            <>
-              <input
-                ref={csvInput}
-                type="file"
-                accept=".csv,text/csv"
-                hidden
-                onChange={(event) => {
+      {canEdit ? (
+        <input
+          ref={csvInput}
+          type="file"
+          accept=".csv,text/csv"
+          hidden
+          onChange={(event) => {
                   const file = event.target.files?.[0];
                   event.target.value = "";
                   if (!file || importing) return;
@@ -1871,90 +1861,33 @@ function FollowUpPanel({ data, commit, canEdit, executives, username, month, all
                   };
                   reader.readAsArrayBuffer(file);
                 }}
-              />
-              <button className="ghost" type="button" title="Columns: Date, Business / Customer, Phone, Source, Interested Service, Lead Status, Business Type, Address, Email" disabled={importing} onClick={() => csvInput.current?.click()}>{importing ? "Importing…" : "Import CSV"}</button>
-              <button className="primary" type="button" onClick={() => { setOpen(blankLead(defaultExecutive(executives, username), month, reserveNextLeadId())); setError(""); setNotice(""); }}>
-                + Add lead
-              </button>
-            </>
-          ) : null}
-        </div>
-      </div>
+        />
+      ) : null}
+      {importing ? <p className="form-note" role="status" aria-live="polite">Importing CSV. Please wait until the leads are saved.</p> : null}
+      {error ? <p className="form-error">{error}</p> : null}
+      {notice ? <p className="form-note">{notice}</p> : null}
       <article className="panel sales-leads">
-        <div className="toolbar">
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search ID, business or phone..." />
-          <select value={status} onChange={(event) => setStatus(event.target.value)}>
-            <option value="">All statuses</option>
-            {LEAD_STAGES.map((item) => <option key={item}>{item}</option>)}
-          </select>
-          <select value={source} onChange={(event) => setSource(event.target.value)}>
-            <option value="">All sources</option>
-            {LEAD_SOURCES.map((item) => <option key={item}>{item}</option>)}
-          </select>
-        </div>
-        {importing ? <p className="form-note" role="status" aria-live="polite">Importing CSV. Please wait until the leads are saved.</p> : null}
-        {error ? <p className="form-error">{error}</p> : null}
-        {notice ? <p className="form-note">{notice}</p> : null}
-        {rows.length === 0 ? (
-          <p className="empty-copy">No matching leads.</p>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>Lead ID</th>
-                <th>Date</th>
-                <th>Business / Customer</th>
-                <th className="phone-cell">Phone</th>
-                <th>Source</th>
-                <th>Interested service</th>
-                <th>Lead status</th>
-                <th>Follow-ups</th>
-                <th>Next follow-up</th>
-                {canRemove ? <th>Actions</th> : null}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((lead) => {
-                const overdue = lead.next && lead.next < today && lead.status !== "Converted" && lead.status !== "Lost";
-                return (
-                  <tr key={lead.id} className={overdue ? "due-row" : ""} onClick={() => { setOpen(lead); setError(""); }}>
-                    <td>
-                      <code>{lead.id}</code>
-                      {lead.clientCode ? <div className="muted">{lead.clientCode}</div> : null}
-                    </td>
-                    <td>{lead.date || "—"}</td>
-                    <td><strong>{lead.business}</strong></td>
-                    <td className="phone-cell">{lead.phone || "—"}</td>
-                    <td>{lead.source || "—"}</td>
-                    <td>{lead.service || "—"}</td>
-                    <td><LeadStatus status={lead.status} /></td>
-                    <td><span className="history-count">{(lead.calls || []).length}</span></td>
-                    <td className={overdue ? "issue-overdue" : ""}>{lead.next || "—"}{overdue ? " · Overdue" : ""}</td>
-                    {canRemove ? (
-                      <td onClick={(event) => event.stopPropagation()}>
-                        <div className="icon-actions">
-                          <IconButton label={`Delete ${lead.business || lead.id}`} tone="danger" onClick={() => { setRemoving(lead); setError(""); }}>
-                            <DeleteIcon />
-                          </IconButton>
-                        </div>
-                      </td>
-                    ) : null}
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
+        <LeadRegister
+          leads={leads.map((lead) => ({ ...lead, owner: lead.executive || username }))}
+          canEdit={canEdit}
+          canRevise={false}
+          canDelete={false}
+          staff={executives}
+          onOpen={(lead) => { setOpen(lead); setError(""); }}
+          onAdd={canEdit ? () => { setOpen(blankLead(defaultExecutive(executives, username), month, reserveNextLeadId())); setError(""); setNotice(""); } : undefined}
+          onDelete={removeSelected}
+          extraActions={canEdit ? <button className="ghost" type="button" title="Columns: Date, Business / Customer, Phone, Source, Interested Service, Lead Status, Business Type, Address, Email" disabled={importing} onClick={() => csvInput.current?.click()}>{importing ? "Importing…" : "Import CSV"}</button> : null}
+        />
       </article>
       {open ? (
         <LeadDialog
           lead={open}
           executives={executives}
-          canEdit={canEdit}
+          canEdit={canEdit && Boolean(open.unsaved)}
           error={error}
           onClose={() => setOpen(null)}
           onSave={save}
-          onDelete={canRemove ? () => { setRemoving(open); setOpen(null); setError(""); } : null}
+          onDelete={null}
         />
       ) : null}
       {removing ? (
@@ -1988,6 +1921,7 @@ function LeadDialog({ lead, executives, canEdit, error, onClose, onSave, onDelet
 
   function submit(event) {
     event.preventDefault();
+    if (!canEdit) return;
     const payload = { ...draft, call: call || undefined, callIndex: call ? callIndex : undefined };
     const result = onSave(payload);
     if (result) setMessage(result);
@@ -1997,6 +1931,8 @@ function LeadDialog({ lead, executives, canEdit, error, onClose, onSave, onDelet
     <SalesModal onClose={onClose}>
       <form className="modal sheet" onSubmit={submit}>
         <h2>{existing ? "Lead profile & follow-ups" : "Add lead"}</h2>
+        {existing && !canEdit ? <p className="page-note">This lead is view only. Sales admins cannot change or delete a lead after it is saved.</p> : null}
+        <fieldset className="plain-fieldset" disabled={!canEdit}>
         <div className="sales-grid">
           <label>
             Lead ID
@@ -2016,10 +1952,7 @@ function LeadDialog({ lead, executives, canEdit, error, onClose, onSave, onDelet
             Business / Customer
             <input value={draft.business} onChange={(event) => setField("business", event.target.value)} required maxLength={150} />
           </label>
-          <label>
-            Phone
-            <input type="tel" inputMode="numeric" value={draft.phone} onChange={(event) => setField("phone", formatPhone(event.target.value))} placeholder="000-000-0000" maxLength={12} required />
-          </label>
+          <LeadPhoneField value={draft.phone} exceptId={existing ? draft.id : ""} onChange={(phone) => setField("phone", phone)} />
           <label>
             Source
             <select value={draft.source} onChange={(event) => setField("source", event.target.value)}>
@@ -2127,6 +2060,7 @@ function LeadDialog({ lead, executives, canEdit, error, onClose, onSave, onDelet
             ) : null}
           </section>
         ) : null}
+        </fieldset>
         {message ? <p className="form-error" role="alert">{message}</p> : null}
         <div className="modal-actions">
           {canEdit ? <button className="primary" type="submit">Save</button> : null}

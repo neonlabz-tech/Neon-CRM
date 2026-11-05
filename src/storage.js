@@ -134,6 +134,21 @@ export async function hydrateFromApi() {
   return data;
 }
 
+export async function refreshSalesAccounts() {
+  const data = await api("/api/bootstrap");
+  let changed = false;
+  (data.stores || []).forEach((item) => {
+    if (item.key !== "neon-crm-sales") return;
+    const full = storeKey(item.key, item.owner);
+    if (dirty.has(full)) return;
+    const next = JSON.stringify(item.data ?? null);
+    if (memory.get(full) === next) return;
+    memory.set(full, next);
+    changed = true;
+  });
+  return changed;
+}
+
 export async function clearOwnerStores(owner) {
   await api(`/api/stores/owner/${encodeURIComponent(owner)}`, { method: "DELETE" });
   [...memory.keys()].forEach((key) => {
