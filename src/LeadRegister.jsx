@@ -53,8 +53,34 @@ function lastOutcome(lead) {
   return calls.length ? calls[calls.length - 1].outcome || "—" : "—";
 }
 
+function latestActivity(lead) {
+  let best = String(lead.latestFollowUpAt || "");
+  (lead.calls || []).forEach((call) => {
+    const stamp = call.updatedAt || call.createdAt || "";
+    if (stamp > best) best = stamp;
+  });
+  return best;
+}
+
 function addedDay(lead) {
-  return String(lead.createdAt || lead.date || "").slice(0, 10);
+  return String(latestActivity(lead) || lead.createdAt || lead.date || "").slice(0, 10);
+}
+
+function shiftDate(iso, days) {
+  const [year, month, day] = String(iso || "").split("-").map(Number);
+  if (!year || !month || !day) return "";
+  const date = new Date(year, month - 1, day);
+  date.setDate(date.getDate() + days);
+  const nextMonth = String(date.getMonth() + 1).padStart(2, "0");
+  const nextDay = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${nextMonth}-${nextDay}`;
+}
+
+function followUpTone(lead, today) {
+  if (!lead.next || lead.status === "Converted") return "";
+  if (lead.next < today) return "follow-overdue";
+  if (lead.next <= shiftDate(today, 3)) return "follow-soon";
+  return "";
 }
 
 function monthGrid(month) {
@@ -440,7 +466,7 @@ export function LeadRegister({
                 <th>#</th>
                 <th>Lead ID</th>
                 <th>Phone / Customer</th>
-                <th>Date added</th>
+                <th>Latest follow-up</th>
                 <th>Source</th>
                 <th>Status</th>
                 <th>Call status</th>
@@ -452,7 +478,9 @@ export function LeadRegister({
             </thead>
             <tbody>
               {visible.map((lead, index) => {
-                const overdue = lead.next && lead.next < today && lead.status !== "Converted" && lead.status !== "Lost";
+                const followTone = followUpTone(lead, today);
+                const activityAt = latestActivity(lead);
+                const shownAt = activityAt || lead.createdAt || lead.date;
                 const key = `${lead.owner || ""}:${lead.id}`;
                 return (
                   <tr key={key}>
@@ -471,13 +499,13 @@ export function LeadRegister({
                       <div className="muted">{lead.business || "—"}</div>
                     </td>
                     <td>
-                      <div>{formatAddedDate(lead.createdAt || lead.date) || "—"}</div>
-                      {lead.createdAt ? <div className="muted">{formatAddedTime(lead.createdAt)}</div> : null}
+                      <div>{formatAddedDate(shownAt) || "—"}</div>
+                      {activityAt || lead.createdAt ? <div className="muted">{formatAddedTime(activityAt || lead.createdAt)}</div> : null}
                     </td>
                     <td>{lead.source || "—"}</td>
                     <td><span className={`project-status ${statusTone(lead.status)}`}>{lead.status || "—"}</span></td>
                     <td>{lastOutcome(lead)}</td>
-                    <td className={overdue ? "issue-overdue" : ""}>{lead.next ? formatAddedDate(lead.next) : "—"}{overdue ? " · Overdue" : ""}</td>
+                    <td className={followTone}>{lead.next ? formatAddedDate(lead.next) : "—"}</td>
                     <td><b>{(lead.calls || []).length}</b></td>
                     {showPerson ? <td>{salesStaffName(lead.owner || lead.executive)}</td> : null}
                     {canRevise || canDelete || onOpen ? (

@@ -7,6 +7,7 @@ import { invoiceDocumentFromPayment, invoiceDocumentFromQuote } from "./brandDoc
 import { approveProjectInvoice, loadFinance, notifyRole, notifyUser, projectInvoiceFor, queueProjectInvoice, rememberPayingClient } from "./finance.js";
 import { EMAIL_ERROR, PHONE_ERROR, emailError, formatPhone, phoneDigits as sriPhoneDigits, phoneError } from "./hrms.js";
 import { dataOwner, readAccount, sessionAccount, writeScoped } from "./scope.js";
+import { readSession } from "./api.js";
 import { crmStorage } from "./storage.js";
 
 const STORAGE_KEY = "neon-crm-sales";
@@ -640,6 +641,7 @@ function mapLeadStatus(value) {
 function normalizeCall(item) {
   if (!item) return null;
   const createdAt = String(item.createdAt || "");
+  const updatedAt = String(item.updatedAt || "");
   return {
     date: String(item.date || ""),
     outcome: CALL_OUTCOMES.includes(item.outcome) ? item.outcome : "Answered",
@@ -647,6 +649,7 @@ function normalizeCall(item) {
     next: String(item.next || ""),
     note: String(item.note || ""),
     createdAt: Number.isNaN(new Date(createdAt).getTime()) ? "" : createdAt,
+    updatedAt: Number.isNaN(new Date(updatedAt).getTime()) ? "" : updatedAt,
   };
 }
 
@@ -672,6 +675,7 @@ function normalizeLead(item) {
     executive: String(item.executive || ""),
     clientCode: String(item.clientCode || "").trim(),
     createdAt: String(item.createdAt || ""),
+    latestFollowUpAt: String(item.latestFollowUpAt || ""),
     contact: email && phone ? `${email} · ${phone}` : String(item.contact || phone || email),
     calls: Array.isArray(item.calls) ? item.calls.map(normalizeCall).filter(Boolean) : [],
   };
@@ -1389,15 +1393,17 @@ export function assignConvertedClientCodes(data) {
     lead.clientCode = "";
     changed = true;
   });
+  const knownCodes = [];
   sortLeadsById(leads).forEach((lead) => {
     if (lead.status !== "Converted") return;
     if (lead.clientCode) {
-      noteClientCode(lead.clientCode);
+      knownCodes.push(lead.clientCode);
       return;
     }
     lead.clientCode = claimClientCode();
     changed = true;
   });
+  noteClientCodes(knownCodes);
   return changed ? { ...data, leads } : data;
 }
 
@@ -1724,30 +1730,55 @@ export function createPayment(data, draft) {
   return { ok: true, data: { ...data, payments: [...data.payments, payment] } };
 }
 
+const releaseStarted = new Set();
+
+function markPaymentPending(username, paymentId) {
+  const key = `${STORAGE_KEY}:${username}`;
+  try {
+    const raw = JSON.parse(crmStorage.getItem(key) || "null");
+    if (!raw || !Array.isArray(raw.payments)) return;
+    let changed = false;
+    raw.payments = raw.payments.map((payment) => {
+      if (payment.id !== paymentId || payment.approval === "pending" || payment.approval === "approved") return payment;
+      changed = true;
+      return { ...payment, approval: "pending" };
+    });
+    if (changed) crmStorage.setItem(key, JSON.stringify(raw));
+  } catch {
+    // The invoice is already with the CEO. The sales row updates the next time that payment is saved.
+  }
+}
+
 export function releaseSalesPaymentsForApproval() {
+  const token = readSession()?.token || "";
   loadUsers().filter((user) => user.active && user.role === "sales").forEach((user) => {
     const sales = readSalesAccount(user.username);
     if (!sales) return;
-    const queued = [];
     sales.payments.forEach((payment) => {
-      if (payment.status === "cancelled" || payment.approval === "approved") return;
+      if (payment.status === "cancelled" || payment.approval === "approved" || payment.approval === "pending") return;
+      const mark = `${user.username}:${payment.id}`;
+      if (releaseStarted.has(mark)) return;
       const quote = locateQuote(sales, payment.quoteId);
       if (!quote) return;
-      const invoice = queueProjectInvoice(invoiceDraft(payment, quote, user.username));
-      if (invoice && payment.approval !== "pending") queued.push(payment.id);
+      releaseStarted.add(mark);
+      void fetch("/api/finance/project-invoices", {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(invoiceDraft(payment, quote, user.username)),
+      }).then((response) => {
+        if (!response.ok) {
+          releaseStarted.delete(mark);
+          return;
+        }
+        markPaymentPending(user.username, payment.id);
+      }).catch(() => {
+        releaseStarted.delete(mark);
+      });
     });
-    if (!queued.length) return;
-    const key = `${STORAGE_KEY}:${user.username}`;
-    try {
-      const raw = JSON.parse(crmStorage.getItem(key) || "null");
-      if (!raw || !Array.isArray(raw.payments)) return;
-      raw.payments = raw.payments.map((payment) => (
-        queued.includes(payment.id) ? { ...payment, approval: "pending" } : payment
-      ));
-      crmStorage.setItem(key, JSON.stringify(raw));
-    } catch {
-      // The invoice is already with the CEO. The sales row updates the next time that payment is saved.
-    }
   });
 }
 
@@ -2050,10 +2081,9 @@ export function saveLead(data, draft) {
   const email = String(draft.email || "").trim();
   const address = String(draft.address || "").trim();
   if (status === "Converted") {
-    if (!email || !address || !digits) {
-      return { ok: false, error: "Enter email, a Sri Lankan phone number, and address before marking Converted. That lead is then listed under Quotations as a client." };
+    if (!address || !digits) {
+      return { ok: false, error: "Enter a Sri Lankan phone number and address before marking Converted. That lead is then listed under Quotations as a client." };
     }
-    if (emailError(email, { required: true })) return { ok: false, error: EMAIL_ERROR };
   }
   if (emailError(email)) return { ok: false, error: EMAIL_ERROR };
   let calls = Array.isArray(existing?.calls) ? existing.calls.map(normalizeCall).filter(Boolean) : [];
@@ -2073,6 +2103,7 @@ export function saveLead(data, draft) {
     } while ((data.leads || []).some((lead) => lead.id === id));
   }
   if (!id) return { ok: false, error: "Lead ID is required." };
+  const activityAt = draft.call ? new Date().toISOString() : "";
   if (draft.call) {
     const previousCall = Number.isInteger(draft.callIndex) ? (existing?.calls || [])[draft.callIndex] : null;
     const rec = normalizeCall({
@@ -2081,7 +2112,8 @@ export function saveLead(data, draft) {
       status: unanswered ? (existing?.status || status) : (draft.call.status || status),
       next: draft.call.next,
       note: draft.call.note,
-      createdAt: previousCall?.createdAt || new Date().toISOString(),
+      createdAt: previousCall?.createdAt || activityAt,
+      updatedAt: activityAt,
     });
     if (rec) {
       if (Number.isInteger(draft.callIndex) && draft.callIndex >= 0 && draft.callIndex < calls.length) {
@@ -2109,6 +2141,7 @@ export function saveLead(data, draft) {
     executive: String(draft.executive || existing?.executive || ""),
     clientCode: nextStatus === "Converted" ? (existing?.clientCode || "") : "",
     createdAt: existing?.createdAt || new Date().toISOString(),
+    latestFollowUpAt: activityAt || existing?.latestFollowUpAt || "",
     calls,
   });
   if (lastCall && draft.call) {

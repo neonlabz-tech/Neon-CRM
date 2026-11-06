@@ -84,6 +84,16 @@ async function drain() {
   }
 }
 
+let storageRevisionValue = 0;
+
+function bumpStorageRevision() {
+  storageRevisionValue += 1;
+}
+
+export function storageRevision() {
+  return storageRevisionValue;
+}
+
 export const crmStorage = {
   getItem(key) {
     return memory.has(key) ? memory.get(key) : null;
@@ -91,14 +101,17 @@ export const crmStorage = {
   setItem(key, value) {
     memory.set(String(key), String(value));
     dirty.add(String(key));
+    bumpStorageRevision();
     scheduleFlush();
   },
   keep(key, value) {
     memory.set(String(key), String(value));
+    bumpStorageRevision();
   },
   removeItem(key) {
     memory.delete(String(key));
     dirty.add(String(key));
+    bumpStorageRevision();
     scheduleFlush();
   },
   key(index) {

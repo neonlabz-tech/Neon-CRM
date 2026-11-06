@@ -1,6 +1,6 @@
 import { loadUsers } from "./crm.js";
 import { dateIsAllowed, interestedServiceType, loadIncomingProjects, projectTypeFromQuote, quoteForClientRecord, salesClientByName } from "./sales.js";
-import { claimProjectCode, noteProjectCode, projectIdTaken, suggestProjectCode } from "./registry.js";
+import { claimProjectCode, noteProjectCode, noteProjectCodes, projectIdTaken, suggestProjectCode } from "./registry.js";
 import { readAccount, readScoped, sessionAccount, writeScoped } from "./scope.js";
 import { crmStorage } from "./storage.js";
 
@@ -27,7 +27,7 @@ export function loadProjects() {
 }
 
 export function saveProjects(data) {
-  (data?.projects || []).forEach((project) => noteProjectCode(project?.code));
+  noteProjectCodes((data?.projects || []).map((project) => project?.code));
   writeScoped(STORAGE_KEY, data);
 }
 
@@ -219,12 +219,12 @@ export function companyProjectCodes(exceptMarketingId = "") {
 }
 
 export function nextCompanyProjectCode(extraCodes = []) {
-  [...companyProjectCodes(), ...extraCodes].forEach((code) => noteProjectCode(code));
+  noteProjectCodes([...companyProjectCodes(), ...extraCodes]);
   return claimProjectCode();
 }
 
 export function suggestCompanyProjectCode(extraCodes = []) {
-  [...companyProjectCodes(), ...extraCodes].forEach((code) => noteProjectCode(code));
+  noteProjectCodes([...companyProjectCodes(), ...extraCodes]);
   return suggestProjectCode();
 }
 
@@ -247,7 +247,7 @@ export function projectCodeTaken(code, { exceptMarketingId = "", clientName = ""
 }
 
 export function withProjectCodes(projects, extraCodes = []) {
-  [...extraCodes, ...(projects || []).map((project) => project?.code)].forEach((code) => noteProjectCode(code));
+  noteProjectCodes([...(extraCodes || []), ...(projects || []).map((project) => project?.code)]);
   const reserved = new Set();
   for (const code of extraCodes) {
     const number = projectCodeNumber(code);

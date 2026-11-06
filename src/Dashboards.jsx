@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { loadUsers } from "./crm.js";
 import {
   approveProjectInvoice,
@@ -30,9 +30,11 @@ import { InvoiceDialog } from "./InvoiceView.jsx";
 const PALETTE = ["#873CFF", "#1A2042", "#C412FC", "#68A8FF", "#F103FA", "#131937", "#070C2B", "#68A8FF"];
 
 export function CeoDashboard() {
-  releaseSalesPaymentsForApproval();
   const [board, setBoard] = useState("company");
   const [revision, setRevision] = useState(0);
+  useEffect(() => {
+    releaseSalesPaymentsForApproval();
+  }, []);
   const [viewing, setViewing] = useState(null);
   const [error, setError] = useState("");
   const period = useReportPeriod();

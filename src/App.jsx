@@ -640,7 +640,7 @@ function Shell({ session, onSignOut }) {
         </header>
         <div className="content">
           <PageView
-            key={`${current.id}:${selectedAccount}:${pageKey}`}
+            key={pageMountKey(current.id, selectedAccount, pageKey)}
             pageId={current.id}
             access={access}
             ceoUsername={session.username}
@@ -866,6 +866,15 @@ function accessCopy(role, pageId, access) {
     return "Overview only. Department details cannot be edited from the CEO account.";
   }
   return "View only. This department is managed by its own team.";
+}
+
+function pageMountKey(pageId, account, pageKey) {
+  const family = pageId === "sales" || pageId.startsWith("sales-")
+    ? "sales"
+    : pageId === "ceo-sales" || pageId.startsWith("ceo-sales-")
+      ? "ceo-sales"
+      : "";
+  return family ? `${family}:${account}:${pageKey}` : `${pageId}:${account}:${pageKey}`;
 }
 
 function PageView({ pageId, access, ceoUsername }) {
