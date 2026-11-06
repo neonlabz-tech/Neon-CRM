@@ -119,7 +119,6 @@ export function SalesWorkspace({ access, username, section, paymentsSource, pers
     setRange({ from: "", to: "" });
   }
   const [data, setData] = useState(() => {
-    releaseSalesPaymentsForApproval();
     const loaded = loadSales();
     const next = assignConvertedClientCodes(loaded);
     if (next !== loaded) {

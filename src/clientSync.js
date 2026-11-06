@@ -4,6 +4,10 @@ import { blankClient as blankMarketingClient, loadMarketing, saveMarketing } fro
 import { canonicalProjectCode, linkedProjectForClient, loadProjects, marketingProjects, nextCompanyProjectCode, saveProjects, syncMarketingProjectsFromDocs, withProjectCodes } from "./projects.js";
 import { interestedServiceType, loadIncomingProjects, quotesByServiceType, salesClientDirectory, serviceTypeFromInterest, sharedLeadRows, startedPaymentClients } from "./sales.js";
 import { readAccount, sessionAccount } from "./scope.js";
+import { storageRevision } from "./storage.js";
+
+let publishCache = null;
+let publishRevision = -1;
 
 export function hasMarketingProject(client, projects) {
   const name = (client?.name || "").trim().toLowerCase();
@@ -21,6 +25,8 @@ export function isVisibleToMarketing(doc) {
 }
 
 export function publishClients() {
+  const revision = storageRevision();
+  if (publishCache && publishRevision === revision) return publishCache;
   const stored = loadProjects();
   const marketing = loadMarketing();
   const ids = canonicalizeProjectIds(marketing);
@@ -34,7 +40,10 @@ export function publishClients() {
   }
   if (named.projectsChanged || coded.changed) saveProjects({ ...stored, projects: named.projects });
   syncMarketingProjectsFromDocs(shared.marketingClients);
-  return { clients: shared.clients, projects: named.projects };
+  const result = { clients: shared.clients, projects: named.projects };
+  publishCache = result;
+  publishRevision = storageRevision();
+  return result;
 }
 
 export function pushMarketingToPm(doc) {

@@ -2726,8 +2726,14 @@ input.file-input {
 .issue-badge.status-resolved { background: #dcfce7; color: #166534; }
 .issue-badge.status-closed { background: #f1f5f9; color: #475569; }
 
-.issue-overdue {
+.issue-overdue,
+.follow-overdue {
   color: #be123c;
+  font-weight: 700;
+}
+
+.follow-soon {
+  color: #c2410c;
   font-weight: 700;
 }
 

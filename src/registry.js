@@ -251,6 +251,10 @@ export function noteProjectCode(code) {
   remember("projects", code);
 }
 
+export function noteProjectCodes(codes) {
+  rememberMany("projects", codes);
+}
+
 export function leadIdTaken(id) {
   return taken("leads", id);
 }
